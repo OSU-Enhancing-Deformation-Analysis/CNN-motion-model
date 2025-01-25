@@ -180,7 +180,7 @@ class VectorField:
         self.center = (random.random() * 2 - 1, random.random() * 2 - 1)
         self.scale = random.random() * 2
         self.rotation = random.random() * 2 * np.pi
-        self.amplitude = random.random() * 2 - 1
+        # self.amplitude = random.random() * 2 - 1
 
     def apply(self, X: farray, Y: farray) -> Tuple[farray, farray]:
         X_centered = X - self.center[0]
@@ -202,58 +202,34 @@ class VectorField:
 
 
 class VectorFieldComposer:
-    def __init__(self, image_size: int):
-        self.image_size = image_size
+    def __init__(self):
         self.fields: List[VectorField] = []
-        self.X, self.Y = np.meshgrid(
-            np.linspace(-1, 1, image_size), np.linspace(-1, 1, image_size)
-        )
-
-        self.available_fields = dict(VECTOR_FIELDS)
+        field = VectorField(name="Random", field_func=rotation_field)
+        field.randomize()
+        self.fields.append(field)
 
     def add_field(self, field_type: str, **kwargs) -> None:
-        """Add a vector field with specified parameters."""
-        if field_type not in self.available_fields:
+        if field_type not in VECTOR_FIELDS:
             raise ValueError(f"Unknown field type: {field_type}")
 
         field = VectorField(
-            name=field_type, field_func=self.available_fields[field_type], **kwargs
+            name=field_type, field_func=VECTOR_FIELDS[field_type], **kwargs
         )
         self.fields.append(field)
 
-    def clear_fields(self) -> None:
-        """Remove all fields."""
-        self.fields = []
+    def pop_field(self) -> None:
+        self.fields.pop()
 
-    def compute_combined_field(
-        self,
-    ) -> Tuple[farray, farray]:
-        """Compute the combined vector field."""
-        total_dx = np.zeros_like(self.X)
-        total_dy = np.zeros_like(self.Y)
+    def last(self) -> VectorField:
+        return self.fields[-1]
+
+    def compute_combined_field(self, X: farray, Y: farray) -> Tuple[farray, farray]:
+        total_dx = np.zeros_like(X)
+        total_dy = np.zeros_like(Y)
 
         for field in self.fields:
-            dx, dy = field.apply(self.X, self.Y)
+            dx, dy = field.apply(X, Y)
             total_dx += dx
             total_dy += dy
 
         return total_dx, total_dy
-
-    def apply_to_image(self, image: farray) -> farray:
-        """Apply the combined field to deform an image."""
-        dx, dy = self.compute_combined_field()
-
-        dx = dx * self.image_size / 2
-        dy = dy * self.image_size / 2
-
-        y, x = np.meshgrid(
-            np.arange(self.image_size), np.arange(self.image_size), indexing="ij"
-        )
-
-        coords = np.stack([y + dy, x + dx])
-
-        # Ensure coordinates stay within bounds
-        coords[0] = np.clip(coords[0], 0, self.image_size - 1)
-        coords[1] = np.clip(coords[1], 0, self.image_size - 1)
-
-        return map_coordinates(image, coords, order=3).astype(np.float32)
