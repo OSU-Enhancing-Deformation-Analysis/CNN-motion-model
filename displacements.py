@@ -109,7 +109,7 @@ def vortex_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return -Y / (r**2 + 0.1), X / (r**2 + 0.1)
 
 
-@vector_field()
+# @vector_field()
 def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     scaled_X = X / 2
     scaled_Y = Y / 2
@@ -204,7 +204,7 @@ class VectorField:
 class VectorFieldComposer:
     def __init__(self):
         self.fields: List[VectorField] = []
-        field = VectorField(name="Random", field_func=rotation_field)
+        field = VectorField(name="rotation_field", field_func=rotation_field)
         field.randomize()
         self.fields.append(field)
 
@@ -233,3 +233,20 @@ class VectorFieldComposer:
             total_dy += dy
 
         return total_dx, total_dy
+
+    def apply_to_image(self, image: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
+        width, height = image.shape
+
+        grid_X, grid_Y = np.meshgrid(
+            np.linspace(-1, 1, width), np.linspace(-1, 1, height)
+        )
+        dU, dV = self.compute_combined_field(grid_X, grid_Y)
+        x, y = np.meshgrid(np.arange(width), np.arange(height))
+
+        new_x = x - dU
+        new_y = y - dV
+
+        warped_image = np.zeros_like(image)
+        warped_image = map_coordinates(image, [new_y, new_x], order=1, mode="wrap")
+
+        return warped_image.astype(np.uint8)

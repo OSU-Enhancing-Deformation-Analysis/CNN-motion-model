@@ -148,7 +148,7 @@ def display_transformed_image():
     minipcolor.set_array(minihue.ravel())
 
     field_list_textbox.set_text(
-        "\n".join(field.name for field in field_composer.fields)
+        "All fields:\n" + "\n".join(field.name for field in field_composer.fields)
     )
 
     fig.canvas.draw_idle()
