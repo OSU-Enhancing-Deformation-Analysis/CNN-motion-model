@@ -250,3 +250,18 @@ class VectorFieldComposer:
         warped_image = map_coordinates(image, [new_y, new_x], order=1, mode="wrap")
 
         return warped_image.astype(np.uint8)
+
+    def display_fields(self, width: int, height: int):
+        grid_X, grid_Y = np.meshgrid(
+            np.linspace(-1, 1, width), np.linspace(-1, 1, height)
+        )
+        dU, dV = self.compute_combined_field(grid_X, grid_Y)
+
+        dU_norm = (dU - dU.min()) / (dU.max() - dU.min())
+        dV_norm = (dV - dV.min()) / (dV.max() - dV.min())
+
+        vector_field_viz = np.zeros((*dU.shape, 3), dtype=np.uint8)
+        vector_field_viz[:, :, 0] = (dU_norm * 255).astype(np.uint8)
+        vector_field_viz[:, :, 1] = (dV_norm * 255).astype(np.uint8)
+
+        return vector_field_viz

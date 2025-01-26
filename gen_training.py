@@ -38,11 +38,18 @@ for image_path in IMAGE_FILES:
             composer.fields.append(field)
 
         base_image = np.array(Image.open(image_path, mode="r"))
-
         transformed_image = composer.apply_to_image(base_image)
 
+        combined_image = np.hstack(
+            [
+                np.stack((base_image,) * 3, axis=-1),
+                np.stack((transformed_image,) * 3, axis=-1),
+                composer.display_fields(base_image.shape[1], base_image.shape[0]),
+            ]
+        )
+
         output_path = os.path.join(output_directory, f"gen_{image_idx}.png")
-        Image.fromarray(transformed_image).save(output_path)
+        Image.fromarray(combined_image).save(output_path)
 
         print(f"Generated image {image_idx + 1}/{num_images}: {output_path}")
         image_idx += 1
