@@ -33,9 +33,7 @@ for image_path in IMAGE_FILES:
         available_fields = list(VECTOR_FIELDS.keys())
         for _ in range(num_fields):
             field_type = random.choice(available_fields)
-            field = VectorField(name=field_type, field_func=VECTOR_FIELDS[field_type])
-            field.randomize()
-            composer.fields.append(field)
+            composer.add_field(field_type, randomize=True)
 
         base_image = np.array(Image.open(image_path, mode="r"))
         transformed_image = composer.apply_to_image(base_image)

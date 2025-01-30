@@ -120,7 +120,7 @@ def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return u, v
 
 
-@vector_field()
+# @vector_field()
 def noise_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return np.random.normal(0, 0.5, size=(X.shape[0], X.shape[1])).astype(
         np.float32
@@ -208,13 +208,15 @@ class VectorFieldComposer:
         field.randomize()
         self.fields.append(field)
 
-    def add_field(self, field_type: str, **kwargs) -> None:
+    def add_field(self, field_type: str, randomize: bool = True, **kwargs) -> None:
         if field_type not in VECTOR_FIELDS:
             raise ValueError(f"Unknown field type: {field_type}")
 
         field = VectorField(
             name=field_type, field_func=VECTOR_FIELDS[field_type], **kwargs
         )
+        if randomize:
+            field.randomize()
         self.fields.append(field)
 
     def pop_field(self) -> None:
