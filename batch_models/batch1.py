@@ -24,7 +24,7 @@ from torch.utils.data import Dataset, DataLoader
 
 # %%
 
-TILES_DIR = "../tiles"
+TILES_DIR = "../../tiles"
 # Load all images (both stem and graphite)
 # TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
 TILE_IMAGE_PATHS = glob.glob(
@@ -287,9 +287,8 @@ class CustomDataset(Dataset):
 
         # Get the image index
         path_index = index % NUM_TILES
-        variation = index // self.variations_per_image
 
-        random.seed(variation)
+        random.seed(index)
 
         composer = VectorFieldComposer()
 
@@ -368,6 +367,7 @@ for x, y in training_dataloader:
     print(f"Shape of y: {y.shape} {y.dtype}")
     break
 
+
 # %% [markdown]
 # # Model
 
@@ -408,7 +408,6 @@ class ConvolutionBlock(nn.Module):
             )
 
     def forward(self, x):
-        # i learned about this in class today! the timing in on point!
         return self.conv(x) + self.residual(x)
 
 
@@ -448,11 +447,8 @@ class MotionVectorRegressionNetwork(nn.Module):
         )
 
     def forward(self, x):
-        # print(x.shape)
         x = self.convolution(x)
-        # print(x.shape)
         x = self.output(x)
-        # print(x.shape)
         return x
 
 
@@ -462,31 +458,8 @@ print(model)
 
 # %%
 def custom_loss(predicted_vectors, target_vectors):
-    # print(predicted_vectors.shape)
-    # print(target_vectors.shape)
     l1_loss = nn.functional.l1_loss(predicted_vectors, target_vectors)
-
-    # some extra leniency to the loss by checking the neighboring pixels
-    # print(predicted_vectors.shape)
-    x_dir = predicted_vectors[:, :, 1:]
-    neighbor_x = predicted_vectors[:, :, :-1]
-
-    y_dir = predicted_vectors[:, :, :, 1:]
-    neighbor_y = predicted_vectors[:, :, :, :-1]
-
-    diff_x = torch.abs(x_dir - neighbor_x)
-    diff_y = torch.abs(y_dir - neighbor_y)
-
-    # print(diff_x.shape)
-    # print(diff_y.shape)
-    diff_x = diff_x.mean()
-    # print(diff_x)
-    diff_y = diff_y.mean()
-
-    smoothening_value = diff_x + diff_y
-    # print(smoothening_value)
     return l1_loss
-    # return l1_loss + 0.1 * smoothening_value
 
 
 # %%
@@ -497,10 +470,7 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 
 # %%
 run = wandb.init(
-    mode="offline",
-    # set the wandb project where this run will be logged
     project="motion-model",
-    # track hyperparameters and run metadata
     name=MODEL_NAME,
     config={
         "learning_rate": LEARNING_RATE,
@@ -527,7 +497,59 @@ wandb.watch(model, log="all", log_freq=100)
 print(run.name)
 
 # %%
-# ebar = tqdm(total = EPOCHS, desc="Epochs", position=1)
+# Samples to save
+
+# indicies_to_save = [
+#     (0, 10),
+#     (0, 30),
+#     (0, 40),
+#     (4, 0),
+#     (5, 0),
+#     (6, 0),
+#     (12, 50),
+# ]
+
+# save_images = []
+
+# for i, v in indicies_to_save:
+#     print(i, v)
+#     print(validation_dataset)
+#     batch_images, batch_vectors = validation_dataset[i]
+#     print(batch_images.shape, batch_vectors.shape)
+#     images = batch_images[v]
+#     vectors = batch_vectors[v]
+
+#     save_images.append((images, vectors))
+
+seeds = [1, 3, 4, 25, 32, 38]
+
+for s in seeds:
+    images, vectors = training_dataset[s]
+    converted_y = vectors
+    converted_y = np.vstack(
+        (converted_y, np.zeros((1, converted_y.shape[1], converted_y.shape[2])))
+    )
+    converted_y = np.transpose(converted_y, (1, 2, 0))
+    converted_y = (converted_y - converted_y.min()) / (
+        converted_y.max() - converted_y.min()
+    )
+
+    base_image = np.array((images[0],) * 3)
+    base_image = np.transpose(base_image, (1, 2, 0))
+    morph_image = np.array((images[1],) * 3)
+    morph_image = np.transpose(morph_image, (1, 2, 0))
+    combined = np.hstack((base_image, morph_image, converted_y * 256)).astype(np.uint8)
+
+    plt.figure(figsize=(20, 5))
+    plt.imshow(combined)
+    plt.title(f"s: {s}")
+    plt.show()
+
+
+# List of tuples of (images, vectors)
+# save_images = torch.from_numpy(np.array(save_images)).float()
+
+# %%
 for epoch in range(EPOCHS):
     print(f"Epoch {epoch+1}\n-------------------------------")
     model.train()
@@ -535,7 +557,6 @@ for epoch in range(EPOCHS):
 
     size = len(training_dataloader)
     milestone = 0
-    # with tqdm(total=size, desc=f"{epoch+1}/{EPOCHS} Batch:", position=0) as pbar:
     for batch, (batch_images, batch_vectors) in enumerate(training_dataloader):
         batch_images, batch_vectors = batch_images.to(device), batch_vectors.to(device)
 
@@ -560,9 +581,6 @@ for epoch in range(EPOCHS):
         )
 
         epoch_training_losses.append(loss.item())
-        # pbar.set_postfix(loss=loss.item())
-        # pbar.update(1)
-        # ebar.update(1/size)
 
         if batch > (milestone * 100):
             milestone += 1
@@ -584,8 +602,6 @@ for epoch in range(EPOCHS):
     average_trianing_loss = np.mean(epoch_training_losses)
     average_validation_loss = np.mean(validation_losses)
 
-    # ebar.reset(epoch)
-
     wandb.log(
         {
             "epoch": epoch,
@@ -595,122 +611,105 @@ for epoch in range(EPOCHS):
         }
     )
 
-    # if epoch % SAVE_FREQUENCY == 0:
-    with torch.no_grad():
-        torch.save(model.state_dict(), "snapshot_save.pt")
+    if epoch % SAVE_FREQUENCY == 0:
+        with torch.no_grad():
+            torch.save(model.state_dict(), "snapshot_save.pt")
 
-        for i, (batch_images, batch_vectors) in enumerate(iter(validation_dataloader)):
-            if i > 4:
-                break
+            sample_predictions = model(save_images.to(device))
 
-            sample_predictions = model(batch_images.to(device))
-
-            converted_y = batch_vectors[0].cpu().numpy()
-            converted_y = np.vstack(
-                (converted_y, np.zeros((1, converted_y.shape[1], converted_y.shape[2])))
-            )
-            converted_y = np.transpose(converted_y, (1, 2, 0))
-            converted_y = (converted_y - converted_y.min()) / (
-                converted_y.max() - converted_y.min()
-            )
-
-            converted_pred = sample_predictions[0].cpu().numpy()
-            converted_pred = np.vstack(
-                (
-                    converted_pred,
-                    np.zeros((1, converted_pred.shape[1], converted_pred.shape[2])),
+            for i, (images, vectors) in enumerate(save_images):
+                converted_y = vectors.cpu().numpy()
+                converted_y = np.vstack(
+                    (
+                        converted_y,
+                        np.zeros((1, converted_y.shape[1], converted_y.shape[2])),
+                    )
                 )
-            )
-            converted_pred = np.transpose(converted_pred, (1, 2, 0))
-            converted_pred = (converted_pred - converted_pred.min()) / (
-                converted_pred.max() - converted_pred.min()
-            )
+                converted_y = np.transpose(converted_y, (1, 2, 0))
+                converted_y = (converted_y - converted_y.min()) / (
+                    converted_y.max() - converted_y.min()
+                )
 
-            base_image = np.array((batch_images[0, 0].cpu().numpy(),) * 3)
-            base_image = np.transpose(base_image, (1, 2, 0))
-            morph_image = np.array((batch_images[0, 1].cpu().numpy(),) * 3)
-            morph_image = np.transpose(morph_image, (1, 2, 0))
-            combined = np.hstack(
-                (base_image, morph_image, converted_y * 256, converted_pred * 256)
-            ).astype(np.uint8)
+                converted_pred = sample_predictions[i].cpu().numpy()
+                converted_pred = np.vstack(
+                    (
+                        converted_pred,
+                        np.zeros((1, converted_pred.shape[1], converted_pred.shape[2])),
+                    )
+                )
+                converted_pred = np.transpose(converted_pred, (1, 2, 0))
+                converted_pred = (converted_pred - converted_pred.min()) / (
+                    converted_pred.max() - converted_pred.min()
+                )
 
-            wandb.log(
-                {
-                    f"samples/sample_{i}": wandb.Image(
-                        combined, caption=f"Epoch: {epoch}"
-                    ),
-                }
-            )
+                base_image = np.array((images[0].cpu().numpy(),) * 3)
+                base_image = np.transpose(base_image, (1, 2, 0))
+                morph_image = np.array((images[1].cpu().numpy(),) * 3)
+                morph_image = np.transpose(morph_image, (1, 2, 0))
+                combined = np.hstack(
+                    (base_image, morph_image, converted_y * 256, converted_pred * 256)
+                ).astype(np.uint8)
 
-        num_examples = 1
-        sequence_name = "g60"
-        if sequence_name not in sequence_arrays:
-            print(
-                f"Sequence '{sequence_name}' not found in sequence_arrays. Please check your data."
-            )
-        else:
-            if 5 not in sequence_arrays[sequence_name]:
-                print(f"Tile 5 not found in sequence '{sequence_name}'.")
-            else:
+                wandb.log(
+                    {
+                        f"validations/sample_{indicies_to_save[i][0]}_{indicies_to_save[i][1]}": wandb.Image(
+                            combined, caption=f"Epoch: {epoch}"
+                        ),
+                    }
+                )
 
-                image_paths = sequence_arrays[sequence_name][5]
+            sequence_name = "g69"  # g69 71-72 tile 9-11
+            tiles = [9, 10, 11]
+            frame_start = 71
 
-                for example_index in range(num_examples):
-                    base_image_path = image_paths[example_index * 2]  # 0, 2, 4
-                    next_time_path = image_paths[example_index * 2 + 1]  # 1, 3, 5
+            for tile in tiles:
+                tile_sequence_paths = sequence_arrays[sequence_name][tile]
 
-                    base_image = np.array(Image.open(base_image_path))
-                    next_time_pil = Image.open(next_time_path)
-                    # next_time_pil = next_time_pil.filter(ImageFilter.GaussianBlur(radius=0.5)) #radius controls the amount of blur
-                    next_time = np.array(next_time_pil)
+                base_image_path = tile_sequence_paths[frame_start]
+                next_time_path = tile_sequence_paths[frame_start + 1]
 
-                    with torch.no_grad():
-                        X = torch.from_numpy(np.array([base_image, next_time])).float()
-                        X = X.unsqueeze(0)
-                        X = X.to(device)
-                        pred = model(X)
+                base_image = np.array(Image.open(base_image_path))
+                next_time = np.array(Image.open(next_time_path))
 
-                        converted_pred = pred[0].cpu().numpy()
-                        converted_pred = np.vstack(
-                            (
-                                converted_pred,
-                                np.zeros(
-                                    (
-                                        1,
-                                        converted_pred.shape[1],
-                                        converted_pred.shape[2],
-                                    )
-                                ),
-                            )
+                with torch.no_grad():
+                    X = torch.from_numpy(np.array([base_image, next_time])).float()
+                    X = X.unsqueeze(0)
+                    X = X.to(device)
+                    pred = model(X)
+
+                    converted_pred = pred[0].cpu().numpy()
+                    converted_pred = np.vstack(
+                        (
+                            converted_pred,
+                            np.zeros(
+                                (
+                                    1,
+                                    converted_pred.shape[1],
+                                    converted_pred.shape[2],
+                                )
+                            ),
                         )
-                        converted_pred = np.transpose(converted_pred, (1, 2, 0))
-                        converted_pred = (converted_pred - converted_pred.min()) / (
-                            converted_pred.max() - converted_pred.min()
-                        )
+                    )
+                    converted_pred = np.transpose(converted_pred, (1, 2, 0))
+                    converted_pred = (converted_pred - converted_pred.min()) / (
+                        converted_pred.max() - converted_pred.min()
+                    )
 
-                        base_image = np.array((X[0, 0].cpu().numpy(),) * 3)
-                        base_image = np.transpose(base_image, (1, 2, 0))
-                        next_time = np.array((X[0, 1].cpu().numpy(),) * 3)
-                        next_time = np.transpose(next_time, (1, 2, 0))
-                        combined = np.hstack(
-                            (base_image, next_time, converted_pred * 256)
-                        ).astype(np.uint8)
+                    base_image = np.array((X[0, 0].cpu().numpy(),) * 3)
+                    base_image = np.transpose(base_image, (1, 2, 0))
+                    next_time = np.array((X[0, 1].cpu().numpy(),) * 3)
+                    next_time = np.transpose(next_time, (1, 2, 0))
+                    combined = np.hstack(
+                        (base_image, next_time, converted_pred * 256)
+                    ).astype(np.uint8)
 
-                        # print(f"Example {example_index + 1}:")
-                        # print(f"  Image pair: {base_image_path}, {next_time_path}")
-                        # print(f"  Combined image min/max: {combined.min()}, {combined.max()}")
-
-                        # plt.figure(figsize=(20, 5))
-                        # plt.imshow(combined)
-                        # plt.title(f"Example {example_index + 1}: {os.path.basename(base_image_path)} vs. {os.path.basename(next_time_path)}") #more descriptive
-                        # plt.show()
-                        wandb.log(
-                            {
-                                f"samples/sample": wandb.Image(
-                                    combined, caption=f"Epoch: {epoch}"
-                                ),
-                            }
-                        )
+                    wandb.log(
+                        {
+                            f"tests/sample_{sequence_name}_{tile}_{frame_start}": wandb.Image(
+                                combined, caption=f"Epoch: {epoch}"
+                            ),
+                        }
+                    )
 
     scheduler.step(average_validation_loss)
 
@@ -732,86 +731,3 @@ wandb.finish()
 
 print(f"Model saved to {MODEL_FILE}")
 print("Done!")
-
-# %% [markdown]
-# # Testing
-
-# %%
-# testin gthe model
-
-model = MotionVectorRegressionNetwork().to(device)
-model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
-
-# %%
-model.eval()
-
-
-test_loss = 0
-i = 0
-with torch.no_grad():
-    for X, y in iter(validation_dataloader):
-        i += 1
-        if i > 10:
-            break
-
-        print(i)
-
-        X, y = X.to(device), y.to(device)
-        pred = model(X)
-        test_loss = custom_loss(pred, y).item()
-
-        print(X.shape, y.shape, pred.shape)
-
-        print(X.cpu().numpy()[0][0].shape)
-
-        # fig = plt.figure(figsize=(23, 5))
-        # axes = fig.subplots(1, 4)
-
-        # conver (2, 256, 256) to (256, 256, 3) and normalize
-        converted_y = y[0].cpu().numpy()
-        converted_y = np.vstack(
-            (converted_y, np.zeros((1, converted_y.shape[1], converted_y.shape[2])))
-        )
-        converted_y = np.transpose(converted_y, (1, 2, 0))
-        converted_y = (converted_y - converted_y.min()) / (
-            converted_y.max() - converted_y.min()
-        )
-
-        converted_pred = pred[0].cpu().numpy()
-        converted_pred = np.vstack(
-            (
-                converted_pred,
-                np.zeros((1, converted_pred.shape[1], converted_pred.shape[2])),
-            )
-        )
-        converted_pred = np.transpose(converted_pred, (1, 2, 0))
-        converted_pred = (converted_pred - converted_pred.min()) / (
-            converted_pred.max() - converted_pred.min()
-        )
-
-        base_image = np.array((X[0, 0].cpu().numpy(),) * 3)
-        base_image = np.transpose(base_image, (1, 2, 0))
-        morph_image = np.array((X[0, 1].cpu().numpy(),) * 3)
-        morph_image = np.transpose(morph_image, (1, 2, 0))
-        combined = np.hstack(
-            (base_image, morph_image, converted_y * 256, converted_pred * 256)
-        ).astype(np.uint8)
-
-        print(combined.min(), combined.max())
-
-        plt.figure(figsize=(20, 5))
-        plt.imshow(combined)
-        plt.show()
-
-        # axes[0].imshow(X[0, 0].cpu().numpy())
-        # axes[0].set_title("Original Image")
-        # axes[1].imshow(X[0, 1].cpu().numpy())
-        # axes[1].set_title("Predicted Image")
-        # axes[2].imshow(converted_y)
-        # axes[2].set_title("Ground Truth Image")
-        # axes[3].imshow(converted_pred)
-        # axes[3].set_title("Predicted Image")
-        # fig.tight_layout()
-        # plt.show()
-
-print(f"Loss: {test_loss:>8f} \n")
