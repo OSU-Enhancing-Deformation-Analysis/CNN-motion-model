@@ -6,6 +6,7 @@ import os
 import glob
 import re
 import random
+import time
 from typing import Callable, List, Tuple, Dict, TypeAlias
 
 import numpy as np
@@ -40,7 +41,13 @@ TILE_SIZE = 256
 VARIATIONS_PER_IMAGE = 10
 
 # Training parameters
-EPOCHS = 10
+# EPOCHS = 10 # Use this or MAX_TIME
+# MAX_TIME = None
+
+EPOCHS = None
+MAX_TIME = 15  # In seconds | Use this or EPOCHS
+# MAX_TIME = 23 * 60 * 60  # In seconds | Use this or EPOCHS
+
 BATCH_SIZE = 64
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
@@ -52,6 +59,19 @@ MODEL_FILE = f"{MODEL_NAME}.pth"
 
 if not os.path.exists(MODEL_NAME):
     os.makedirs(MODEL_NAME)
+
+# %%
+device = (
+    torch.accelerator.current_accelerator().type
+    if torch.accelerator.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+GPU_MEMORY = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # in GB
+GPU = torch.cuda.get_device_name(0)
+print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
+
 # %% [markdown]
 # # Dataset
 
@@ -371,14 +391,6 @@ for x, y in training_dataloader:
 # %% [markdown]
 # # Model
 
-# %%
-device = (
-    torch.accelerator.current_accelerator().type
-    if torch.accelerator.is_available()
-    else "cpu"
-)
-print(f"Using {device} device")
-
 
 # %%
 class ConvolutionBlock(nn.Module):
@@ -469,28 +481,39 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 )
 
 # %%
+wandb_config = {
+    "learning_rate": LEARNING_RATE,
+    "batch_size": BATCH_SIZE,
+    "architecture": "MotionVectorRegressionNetwork",
+    "dataset": {
+        "train": len(training_dataset),
+        "val": len(validation_dataset),
+    },
+    "loss_function": "L1",
+    "optimizer": "Adam",
+    "scheduler": {
+        "type": "ReduceLROnPlateau",
+        "factor": 0.1,
+        "patience": 5,
+        "mode": "min",
+        "threshold": 0.0001,
+    },
+}
+if MAX_TIME:
+    wandb_config["max_time"] = MAX_TIME
+else:
+    wandb_config["epochs"] = EPOCHS
+
 run = wandb.init(
     project="motion-model",
     name=MODEL_NAME,
-    config={
-        "learning_rate": LEARNING_RATE,
-        "epochs": EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "architecture": "MotionVectorRegressionNetwork",
-        "dataset": {
-            "train": len(training_dataset),
-            "val": len(validation_dataset),
-        },
-        "loss_function": "L1",
-        "optimizer": "Adam",
-        "scheduler": {
-            "type": "ReduceLROnPlateau",
-            "factor": 0.1,
-            "patience": 5,
-            "mode": "min",
-            "threshold": 0.0001,
-        },
-    },
+    config=wandb_config,
+)
+
+run.alert(
+    title=f"Start Training",
+    text=f"Starting training for {MODEL_NAME}. Max time: {MAX_TIME} seconds, Epochs: {EPOCHS}, Batch size: {BATCH_SIZE}, GPU Memory: {GPU_MEMORY}, GPU: {GPU}",
+    level="INFO",
 )
 
 wandb.watch(model, log="all", log_freq=100)
@@ -499,58 +522,29 @@ print(run.name)
 # %%
 # Samples to save
 
-# indicies_to_save = [
-#     (0, 10),
-#     (0, 30),
-#     (0, 40),
-#     (4, 0),
-#     (5, 0),
-#     (6, 0),
-#     (12, 50),
-# ]
-
-# save_images = []
-
-# for i, v in indicies_to_save:
-#     print(i, v)
-#     print(validation_dataset)
-#     batch_images, batch_vectors = validation_dataset[i]
-#     print(batch_images.shape, batch_vectors.shape)
-#     images = batch_images[v]
-#     vectors = batch_vectors[v]
-
-#     save_images.append((images, vectors))
-
+samples_images = []
+samples_vectors = []
 seeds = [1, 3, 4, 25, 32, 38]
 
 for s in seeds:
     images, vectors = training_dataset[s]
-    converted_y = vectors
-    converted_y = np.vstack(
-        (converted_y, np.zeros((1, converted_y.shape[1], converted_y.shape[2])))
-    )
-    converted_y = np.transpose(converted_y, (1, 2, 0))
-    converted_y = (converted_y - converted_y.min()) / (
-        converted_y.max() - converted_y.min()
-    )
-
-    base_image = np.array((images[0],) * 3)
-    base_image = np.transpose(base_image, (1, 2, 0))
-    morph_image = np.array((images[1],) * 3)
-    morph_image = np.transpose(morph_image, (1, 2, 0))
-    combined = np.hstack((base_image, morph_image, converted_y * 256)).astype(np.uint8)
-
-    plt.figure(figsize=(20, 5))
-    plt.imshow(combined)
-    plt.title(f"s: {s}")
-    plt.show()
+    samples_images.append(images)
+    samples_vectors.append(vectors)
 
 
 # List of tuples of (images, vectors)
-# save_images = torch.from_numpy(np.array(save_images)).float()
+samples_images = torch.from_numpy(np.array(samples_images)).float()
 
 # %%
-for epoch in range(EPOCHS):
+
+epoch = -1
+keep_training = True
+
+training_start_time = time.time()
+
+while keep_training:
+    epoch += 1
+
     print(f"Epoch {epoch+1}\n-------------------------------")
     model.train()
     epoch_training_losses = []
@@ -615,10 +609,12 @@ for epoch in range(EPOCHS):
         with torch.no_grad():
             torch.save(model.state_dict(), "snapshot_save.pt")
 
-            sample_predictions = model(save_images.to(device))
+            sample_predictions = model(samples_images.to(device))
 
-            for i, (images, vectors) in enumerate(save_images):
-                converted_y = vectors.cpu().numpy()
+            for i, images in enumerate(samples_images):
+                vectors = samples_vectors[i]
+
+                converted_y = vectors
                 converted_y = np.vstack(
                     (
                         converted_y,
@@ -652,7 +648,7 @@ for epoch in range(EPOCHS):
 
                 wandb.log(
                     {
-                        f"validations/sample_{indicies_to_save[i][0]}_{indicies_to_save[i][1]}": wandb.Image(
+                        f"validations/sample_s{seeds[i]}": wandb.Image(
                             combined, caption=f"Epoch: {epoch}"
                         ),
                     }
@@ -660,11 +656,10 @@ for epoch in range(EPOCHS):
 
             sequence_name = "g69"  # g69 71-72 tile 9-11
             tiles = [9, 10, 11]
-            frame_start = 71
+            frame_start = 71 - 35
 
             for tile in tiles:
                 tile_sequence_paths = sequence_arrays[sequence_name][tile]
-
                 base_image_path = tile_sequence_paths[frame_start]
                 next_time_path = tile_sequence_paths[frame_start + 1]
 
@@ -716,6 +711,28 @@ for epoch in range(EPOCHS):
     print(f"Epoch {epoch+1}/{EPOCHS}")
     print(f"Train Loss: {average_trianing_loss:.4f}")
     print(f"Val Loss: {average_validation_loss:.4f}")
+
+    if MAX_TIME:
+        if time.time() - training_start_time > MAX_TIME:
+            keep_training = False
+            print(f"Max time reached. Stopping training.")
+            break
+        else:
+            print(
+                f"Training for {MAX_TIME - time.time() + training_start_time} more seconds."
+            )
+    elif EPOCHS:
+        if epoch >= EPOCHS:
+            keep_training = False
+            print(f"Max epochs reached. Stopping training.")
+            break
+
+run.alert(
+    title=f"End Training",
+    text=f"Training finished for {MODEL_NAME}. Completed in {time.time() - training_start_time:.2f} seconds, Epochs: {epoch+1}",
+    level="INFO",
+)
+
 
 model_artifact = wandb.Artifact(
     name=f"motion_vector_model_{run.id}",
