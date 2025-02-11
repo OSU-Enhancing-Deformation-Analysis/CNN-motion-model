@@ -249,7 +249,12 @@ class VectorFieldComposer:
         new_y = y - dV
 
         warped_image = np.zeros_like(image)
-        warped_image = map_coordinates(image, [new_y, new_x], order=1, mode="wrap")
+        warped_image = map_coordinates(
+            image,
+            [new_y, new_x],
+            order=1,
+            mode="nearest",
+        )
 
         return warped_image.astype(np.uint8)
 
