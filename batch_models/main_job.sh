@@ -9,11 +9,11 @@
 # Define variables
 BATCH_FILE="batchfile-here.py"
 MODEL_NAME="b3-[namehere]"
-TOKEN_FILE="~/capstone/hpc_github_token"
-# DATASET="~/hpc-share/tiles/gDenoised/" Will copy this folder. options: gDenoised, gRaw, sDenoised, sRaw
-DATASET="~/hpc-share/tiles/gDenoised/"
+TOKEN_FILE=~/capstone/hpc_github_token
+# DATASET=~/hpc-share/tiles/gDenoised/ Will copy this folder. options: gDenoised, gRaw, sDenoised, sRaw
+DATASET=~/hpc-share/tiles/gDenoised/
 GITHUB_URL="https://raw.githubusercontent.com/OSU-Enhancing-Deformation-Analysis/CNN-motion-model/refs/heads/main/batch_models/$BATCH_FILE"
-PYTHON_ENV="~/hpc-share/capstone_model_training/bin/activate"
+PYTHON_ENV=~/hpc-share/capstone_model_training/bin/activate
 
 # Read the GitHub token
 if [[ ! -f "$TOKEN_FILE" ]]; then
