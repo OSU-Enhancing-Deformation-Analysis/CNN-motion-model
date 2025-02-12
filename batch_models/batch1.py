@@ -482,6 +482,8 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
 
 # %%
 wandb_config = {
+    "gpu": GPU,
+    "gpu_memory": GPU_MEMORY,
     "learning_rate": LEARNING_RATE,
     "batch_size": BATCH_SIZE,
     "architecture": "MotionVectorRegressionNetwork",
