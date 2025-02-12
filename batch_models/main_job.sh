@@ -1,14 +1,49 @@
 #!/bin/bash
 # JOB HEADERS HERE
-#SBATCH --job-name=3D-CNN
-#SBATCH --output=3D-CNN.out
-#SBATCH --error=3D-CNN.err
-#SBATCH --partition=dgxh
+#SBATCH --job-name=Train_CNN
+#SBATCH --partition=dgx2
 #SBATCH --gres=gpu:1
 #SBATCH --mem=8G
 #SBATCH --time=24:00:00
-#SBATCH --constraint=a40
 
-source ~/hpc-share/capstone_model_training/bin/activate
+# Define variables
+BATCH_FILE="batch1.py"
+TOKEN_FILE="~/capstone/hpc_github_token"
+# DATASET="~/hpc-share/tiles/gDenoised/" Will copy this folder. options: gDenoised, gRaw, sDenoised, sRaw
+DATASET="~/hpc-share/tiles/gDenoised/"
+GITHUB_URL="https://raw.githubusercontent.com/OSU-Enhancing-Deformation-Analysis/CNN-motion-model/refs/heads/main/batch_models/$BATCH_FILE"
+PYTHON_ENV="~/hpc-share/capstone_model_training/bin/activate"
 
-python main.py
+# Read the GitHub token
+if [[ ! -f "$TOKEN_FILE" ]]; then
+    echo "Error: Token file not found!"
+    exit 1
+fi
+TOKEN=$(cat "$TOKEN_FILE")
+
+# Download the batch file using wget with the token
+wget --header="Authorization: token $TOKEN" -O "$BATCH_FILE" "$GITHUB_URL"
+if [[ $? -ne 0 ]]; then
+    echo "Error: Failed to download batch file!"
+    exit 1
+fi
+
+# Source the Python environment
+if [[ -f "$PYTHON_ENV" ]]; then
+    source "$PYTHON_ENV"
+else
+    echo "Error: Python environment not found!"
+    exit 1
+fi
+
+# Copy the tile dataset and rename it to 'tiles'
+if [[ -d "$DATASET" ]]; then
+    cp -r "$DATASET" ./tiles
+else
+    echo "Error: Tile dataset not found!"
+    exit 1
+fi
+
+echo "Setup complete!"
+
+python "$BATCH_FILE"

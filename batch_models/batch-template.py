@@ -24,15 +24,24 @@ from torch.utils.data import Dataset, DataLoader
 # ### Constants
 
 # %%
+device = (
+    torch.accelerator.current_accelerator().type
+    if torch.accelerator.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
 
-TILES_DIR = "../../tiles"
+GPU_MEMORY = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # in GB
+GPU = torch.cuda.get_device_name(0)
+print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
+
+# %%
+
+TILES_DIR = "./tiles"
 # Load all images (both stem and graphite)
-# TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
-TILE_IMAGE_PATHS = glob.glob(
-    os.path.join(TILES_DIR, "g*/**/*.png"), recursive=True
-)  # Just the graphite images
-MAX_TILES = 100  # For just quick tests
-# MAX_TILES = 50000 # For running all the images
+TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
+# MAX_TILES = 100  # For just quick tests
+MAX_TILES = 50000  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
 TILE_SIZE = 256
@@ -45,10 +54,12 @@ VARIATIONS_PER_IMAGE = 10
 # MAX_TIME = None
 
 EPOCHS = None
-MAX_TIME = 15  # In seconds | Use this or EPOCHS
-# MAX_TIME = 23 * 60 * 60  # In seconds | Use this or EPOCHS
+# MAX_TIME = 15  # In seconds | Use this or EPOCHS
+MAX_TIME = 23.5 * 60 * 60  # In seconds | Use this or EPOCHS
 
-BATCH_SIZE = 64
+# ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13)
+# BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
 SAVE_FREQUENCY = 5  # Writes a checkpoint file
@@ -59,18 +70,6 @@ MODEL_FILE = f"{MODEL_NAME}.pth"
 
 if not os.path.exists(MODEL_NAME):
     os.makedirs(MODEL_NAME)
-
-# %%
-device = (
-    torch.accelerator.current_accelerator().type
-    if torch.accelerator.is_available()
-    else "cpu"
-)
-print(f"Using {device} device")
-
-GPU_MEMORY = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # in GB
-GPU = torch.cuda.get_device_name(0)
-print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 
 # %% [markdown]
 # # Dataset
