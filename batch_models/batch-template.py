@@ -6,6 +6,7 @@ import os
 import glob
 import re
 import random
+import sys
 import time
 from typing import Callable, List, Tuple, Dict, TypeAlias
 
@@ -65,7 +66,10 @@ LEARNING_RATE = 0.0001
 SAVE_FREQUENCY = 5  # Writes a checkpoint file
 
 # Model name for saving files and in wandb
-MODEL_NAME = "b3-[TEST HERE]"
+if len(sys.argv) < 2:
+    MODEL_NAME = "b3-unknown-test"
+else:
+    MODEL_NAME = sys.argv[1]
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
 if not os.path.exists(MODEL_NAME):

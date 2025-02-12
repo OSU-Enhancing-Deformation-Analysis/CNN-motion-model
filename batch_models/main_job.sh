@@ -7,7 +7,8 @@
 #SBATCH --time=24:00:00
 
 # Define variables
-BATCH_FILE="batch1.py"
+BATCH_FILE="batchfile-here.py"
+MODEL_NAME="b3-[namehere]"
 TOKEN_FILE="~/capstone/hpc_github_token"
 # DATASET="~/hpc-share/tiles/gDenoised/" Will copy this folder. options: gDenoised, gRaw, sDenoised, sRaw
 DATASET="~/hpc-share/tiles/gDenoised/"
@@ -46,4 +47,4 @@ fi
 
 echo "Setup complete!"
 
-python "$BATCH_FILE"
+python "$BATCH_FILE" "$MODEL_NAME"
