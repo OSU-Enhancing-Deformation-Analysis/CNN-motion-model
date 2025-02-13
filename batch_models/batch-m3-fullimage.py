@@ -38,15 +38,15 @@ print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 
 # %%
 
-TILES_DIR = "./tiles"
+TILES_DIR = "../../raw"
+# TILES_DIR = ".tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.tif"), recursive=True)
 # MAX_TILES = 100  # For just quick tests
 MAX_TILES = 50000  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
-TILE_WIDTH = 1024
-TILE_HEIGHT = 943
+TILE_SIZE = 1024
 
 # Dataset parameters
 VARIATIONS_PER_IMAGE = 10
@@ -66,10 +66,11 @@ LEARNING_RATE = 0.0001
 SAVE_FREQUENCY = 5  # Writes a checkpoint file
 
 # Model name for saving files and in wandb
-if len(sys.argv) < 2:
-    MODEL_NAME = "b3-unknown-test"
-else:
-    MODEL_NAME = sys.argv[1]
+MODEL_NAME = "b3m3-fullimage"
+# if len(sys.argv) < 2:
+#     MODEL_NAME = "b3-unknown-test"
+# else:
+#     MODEL_NAME = sys.argv[1]
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
 if not os.path.exists(MODEL_NAME):
@@ -319,10 +320,16 @@ class CustomDataset(Dataset):
             composer.add_field(field_type, randomize=True)
 
         image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        # Pad image to tile size
+        image = np.pad(
+            image,
+            ((0, TILE_SIZE - image.shape[0]), (0, TILE_SIZE - image.shape[1])),
+            mode="constant",
+        )
         image2 = composer.apply_to_image(image)
 
         grid_X, grid_Y = np.meshgrid(
-            np.linspace(-1, 1, TILE_WIDTH), np.linspace(-1, 1, TILE_HEIGHT)
+            np.linspace(-1, 1, TILE_SIZE), np.linspace(-1, 1, TILE_SIZE)
         )
         dx, dy = composer.compute_combined_field(grid_X, grid_Y)
 
