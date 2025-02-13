@@ -56,7 +56,7 @@ VARIATIONS_PER_IMAGE = 10
 
 EPOCHS = None
 # MAX_TIME = 15  # In seconds | Use this or EPOCHS
-MAX_TIME = 23.5 * 60 * 60  # In seconds | Use this or EPOCHS
+MAX_TIME = 10 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
 BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13)
