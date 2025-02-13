@@ -7,6 +7,7 @@ import glob
 import re
 import random
 import sys
+import cv2
 import time
 from typing import Callable, List, Tuple, Dict, TypeAlias
 
@@ -41,22 +42,22 @@ print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 TILES_DIR = "./tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
-MAX_TILES = 1000  # For just quick tests
-# MAX_TILES = 50000  # For running all the images
+# MAX_TILES = 100  # For just quick tests
+MAX_TILES = 50000  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
 TILE_SIZE = 256
 
 # Dataset parameters
-VARIATIONS_PER_IMAGE = 10
+VARIATIONS_PER_IMAGE = 5
 
 # Training parameters
-EPOCHS = 10  # Use this or MAX_TIME
-MAX_TIME = None
+# EPOCHS = 10 # Use this or MAX_TIME
+# MAX_TIME = None
 
-# EPOCHS = None
+EPOCHS = None
 # MAX_TIME = 15  # In seconds | Use this or EPOCHS
-# MAX_TIME = 23.5 * 60 * 60  # In seconds | Use this or EPOCHS
+MAX_TIME = 12 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
 BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13)
@@ -66,13 +67,11 @@ LEARNING_RATE = 0.0001
 SAVE_FREQUENCY = 5  # Writes a checkpoint file
 
 # Model name for saving files and in wandb
-if len(sys.argv) < 5:
+if len(sys.argv) < 2:
     MODEL_NAME = "b3-unknown-test"
 else:
     MODEL_NAME = sys.argv[1]
-    EPOCHS = int(sys.argv[2])
-    LEARNING_RATE = float(sys.argv[3])
-    BATCH_SIZE = int(sys.argv[4])
+
 
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
@@ -227,9 +226,6 @@ class VectorField:
 class VectorFieldComposer:
     def __init__(self):
         self.fields: List[VectorField] = []
-        field = VectorField(name="rotation_field", field_func=rotation_field)
-        field.randomize()
-        self.fields.append(field)
 
     def add_field(self, field_type: str, randomize: bool = True, **kwargs) -> None:
         if field_type not in VECTOR_FIELDS:
@@ -327,6 +323,9 @@ class CustomDataset(Dataset):
 
         image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
         image2 = composer.apply_to_image(image)
+
+        image = cv2.GaussianBlur(image, (5, 5), 0)
+        image2 = cv2.GaussianBlur(image2, (5, 5), 0)
 
         grid_X, grid_Y = np.meshgrid(
             np.linspace(-1, 1, TILE_SIZE), np.linspace(-1, 1, TILE_SIZE)

@@ -70,6 +70,8 @@ if len(sys.argv) < 2:
     MODEL_NAME = "b3-unknown-test"
 else:
     MODEL_NAME = sys.argv[1]
+
+
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
 if not os.path.exists(MODEL_NAME):
@@ -223,9 +225,6 @@ class VectorField:
 class VectorFieldComposer:
     def __init__(self):
         self.fields: List[VectorField] = []
-        field = VectorField(name="rotation_field", field_func=rotation_field)
-        field.randomize()
-        self.fields.append(field)
 
     def add_field(self, field_type: str, randomize: bool = True, **kwargs) -> None:
         if field_type not in VECTOR_FIELDS:
