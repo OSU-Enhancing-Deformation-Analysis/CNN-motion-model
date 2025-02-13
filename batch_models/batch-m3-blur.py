@@ -536,7 +536,13 @@ seeds = [1, 3, 4, 25, 32, 38]
 
 for s in seeds:
     images, vectors = training_dataset[s]
-    samples_images.append(images)
+    image = images[0]
+    image2 = images[1]
+
+    image = cv2.GaussianBlur(image, (5, 5), 0)
+    image2 = cv2.GaussianBlur(image2, (5, 5), 0)
+
+    samples_images.append([image, image2])
     samples_vectors.append(vectors)
 
 
@@ -673,6 +679,9 @@ while keep_training:
 
                 base_image = np.array(Image.open(base_image_path))
                 next_time = np.array(Image.open(next_time_path))
+
+                base_image = cv2.GaussianBlur(base_image, (5, 5), 0)
+                next_time = cv2.GaussianBlur(next_time, (5, 5), 0)
 
                 with torch.no_grad():
                     X = torch.from_numpy(np.array([base_image, next_time])).float()
