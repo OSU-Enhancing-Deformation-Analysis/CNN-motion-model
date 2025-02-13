@@ -128,7 +128,7 @@ class VectorField:
         self.center = (random.random() * 2 - 1, random.random() * 2 - 1)
         self.scale = random.random() * 2
         self.rotation = random.random() * 2 * np.pi
-        # self.amplitude = random.random() * 2 - 1
+        self.amplitude = random.random() * 2 - 1
 
     def apply(self, X: farray, Y: farray) -> Tuple[farray, farray]:
         X_centered = X - self.center[0]
@@ -152,6 +152,8 @@ class VectorField:
 class VectorFieldComposer:
     def __init__(self):
         self.fields: List[VectorField] = []
+        new_field = VectorField(name="new", field_func=translation_field)
+        self.fields.append(new_field)
 
     def add_field(self, field_type: str, randomize: bool = True, **kwargs) -> None:
         if field_type not in VECTOR_FIELDS:
