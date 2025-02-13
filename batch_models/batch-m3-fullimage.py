@@ -38,8 +38,7 @@ print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 
 # %%
 
-TILES_DIR = "../../raw"
-# TILES_DIR = ".tiles"
+TILES_DIR = ".tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.tif"), recursive=True)
 # MAX_TILES = 100  # For just quick tests
@@ -66,11 +65,11 @@ LEARNING_RATE = 0.0001
 SAVE_FREQUENCY = 5  # Writes a checkpoint file
 
 # Model name for saving files and in wandb
-MODEL_NAME = "b3m3-fullimage"
-# if len(sys.argv) < 2:
-#     MODEL_NAME = "b3-unknown-test"
-# else:
-#     MODEL_NAME = sys.argv[1]
+if len(sys.argv) < 2:
+    MODEL_NAME = "b3-unknown-test"
+else:
+    MODEL_NAME = sys.argv[1]
+
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
 if not os.path.exists(MODEL_NAME):
