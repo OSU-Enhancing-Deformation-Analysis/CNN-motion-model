@@ -48,7 +48,7 @@ NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 TILE_SIZE = 256
 
 # Dataset parameters
-VARIATIONS_PER_IMAGE = 100
+VARIATIONS_PER_IMAGE = 10
 
 # Training parameters
 # EPOCHS = 10 # Use this or MAX_TIME
@@ -113,77 +113,6 @@ def vector_field():
 @vector_field()
 def translation_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return np.ones_like(X), np.zeros_like(Y)
-
-
-@vector_field()
-def rotation_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return -Y, X
-
-
-@vector_field()
-def shear_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return np.ones_like(X), X
-
-
-@vector_field()
-def shear_field2(X, Y):
-    return Y, np.zeros_like(Y)
-
-
-@vector_field()
-def scale_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return X, Y
-
-
-@vector_field()
-def gradient_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return X**2, Y**2
-
-
-@vector_field()
-def gradient_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
-    field = X**2 + Y**2
-    return np.gradient(field, axis=0) * 10, np.gradient(field, axis=1) * 10
-
-
-@vector_field()
-def harmonic_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return np.sin(X), np.cos(Y)
-
-
-@vector_field()
-def harmonic_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
-    innerX = 2 * np.pi * X
-    innerY = 2 * np.pi * Y
-    return (np.sin(innerX) * np.cos(innerY)).astype(np.float32), (
-        -np.cos(innerX) * np.sin(innerY)
-    ).astype(np.float32)
-
-
-@vector_field()
-def pearling_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    r = np.sqrt(X**2 + Y**2)
-    return np.sin(2 * np.pi * X) * X / (r + 1e-3), np.cos(2 * np.pi * Y) * Y / (
-        r + 1e-3
-    )
-
-
-@vector_field()
-def outward_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    r = np.sqrt(X**2 + Y**2)
-    return X / (r + 1e-3), Y / (r + 1e-3)
-
-
-@vector_field()
-def compressing_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    r = np.sqrt(X**2 + Y**2)
-    return -X / (r + 1e-3), -Y / (r + 1e-3)
-
-
-@vector_field()
-def vortex_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    r = np.sqrt(X**2 + Y**2)
-    return -Y / (r**2 + 0.1), X / (r**2 + 0.1)
 
 
 @dataclass

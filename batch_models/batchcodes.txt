@@ -1,0 +1,5 @@
+I'm writing these down because I know I will forget them
+
+b3-m3rg: Batch 3 template using Model 3 trained on Raw Graphite
+b3-m3dg: Batch 3 template using Model 3 trained on Denoised Graphite
+b3-m3rs: Batch 3 template using Model 3 trained on Raw Stems
