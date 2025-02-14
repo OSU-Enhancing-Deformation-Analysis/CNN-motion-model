@@ -48,7 +48,7 @@ NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 TILE_SIZE = 256
 
 # Dataset parameters
-VARIATIONS_PER_IMAGE = 5
+VARIATIONS_PER_IMAGE = 1
 
 # Training parameters
 # EPOCHS = 10 # Use this or MAX_TIME
