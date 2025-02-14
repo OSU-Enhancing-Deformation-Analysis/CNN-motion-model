@@ -63,7 +63,7 @@ BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13)
 # BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
-SAVE_FREQUENCY = 5  # Writes a checkpoint file
+SAVE_FREQUENCY = 1  # Writes a checkpoint file
 
 # Model name for saving files and in wandb
 if len(sys.argv) < 2:
