@@ -1,7 +1,7 @@
 # %% [markdown]
 # ### Imports
 
-#  This model adds a correlation layer to the m4 model.
+#  This model changes the loss function of the correlation model
 #
 
 # %%
@@ -1288,8 +1288,17 @@ print(model)
 
 # %%
 def custom_loss(predicted_vectors, target_vectors):
-    l1_loss = nn.functional.l1_loss(predicted_vectors, target_vectors)
-    return l1_loss
+    # l1_loss = nn.functional.l1_loss(predicted_vectors, target_vectors)
+    # return l1_loss
+
+    squared_difference = (predicted_vectors - target_vectors)**2
+
+    epe_map = torch.sqrt(squared_difference.sum(dim=1)) # N, H, W - EPE for each pixel
+
+    # Average EPE over all pixels and batch
+    epe_loss = epe_map.mean()
+
+    return epe_loss
 
 
 # %%
