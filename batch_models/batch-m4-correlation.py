@@ -851,10 +851,6 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     if rotation is None:
         rotation = random.uniform(0, 2 * np.pi)  # Rotation for noise orientation (image rotation)
 
-    if pnp is None:
-        print("perlin-numpy is not available, returning checkerboard instead.")
-        return create_checkers_shape(size)  # Fallback if perlin-numpy is not installed
-
     scaled_size_float = size * scale  # Calculate scaled size as float first
     scaled_size = int(scaled_size_float)  # Convert to int
     scaled_size = (scaled_size // res) * res  # Ensure scaled_size is a multiple of res (integer division then multiply)
@@ -867,7 +863,7 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     if seed is not None:
         np.random.seed(seed)  # Seed for reproducibility
 
-    noise = pnp.generate_fractal_noise_2d((scaled_size, scaled_size), res=(res, res), octaves=octaves, persistence=persistence, lacunarity=1)  # Ensure lacunarity is int
+    noise = pnp.generate_fractal_noise_2d((scaled_size, scaled_size), res=(res, res), octaves=octaves, persistence=persistence)  # Ensure lacunarity is int
     normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(np.uint8)  # Noise generated on scaled size
 
     perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size

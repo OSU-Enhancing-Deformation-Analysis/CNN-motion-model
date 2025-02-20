@@ -867,7 +867,7 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     if seed is not None:
         np.random.seed(seed)  # Seed for reproducibility
 
-    noise = pnp.generate_fractal_noise_2d((scaled_size, scaled_size), res=(res, res), octaves=octaves, persistence=persistence, lacunarity=1)  # Ensure lacunarity is int
+    noise = pnp.generate_fractal_noise_2d((scaled_size, scaled_size), res=(res, res), octaves=octaves, persistence=persistence)  # Ensure lacunarity is int
     normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(np.uint8)  # Noise generated on scaled size
 
     perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size
