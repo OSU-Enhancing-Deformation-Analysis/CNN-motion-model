@@ -180,8 +180,8 @@ def vortex_field(X: farray, Y: farray) -> Tuple[farray, farray]:
 
 @vector_field()
 def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    noise_x = pnp.generate_fractal_noise_2d((X.shape[0], X.shape[1]), res=(1, 1), octaves=4)
-    noise_y = pnp.generate_fractal_noise_2d((X.shape[0], X.shape[1]), res=(1, 1), octaves=4)
+    noise_x = pnp.generate_perlin_noise_2d((X.shape[0], X.shape[1]), res=(1, 1))
+    noise_y = pnp.generate_perlin_noise_2d((X.shape[0], X.shape[1]), res=(1, 1))
     return noise_x, noise_y
 
 
@@ -840,12 +840,6 @@ def create_wave_pattern_shape(size, position=None, scale=None, rotation=None):
 
 def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=None, seed=None, position=None, scale=None, rotation=None, res=8):  # Corrected lacunarity type
     """Creates a Perlin noise pattern with randomized parameters, position, scale, and rotation (scale/position effect)."""
-    if octaves is None:
-        octaves = random.randint(3, 6)
-    if persistence is None:
-        persistence = random.uniform(0.3, 0.7)
-    if lacunarity is None:
-        lacunarity = random.randint(2, 3)  # Lacunarity as int
     if position is None:
         position_x = random.randint(-size // 4, size // 4)
         position_y = random.randint(-size // 4, size // 4)
@@ -854,14 +848,14 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
         scale = random.uniform(0.5, 2.0)
     if rotation is None:
         rotation = random.uniform(0, 2 * np.pi)  # Rotation for noise orientation (image rotation)
-
-    if pnp is None:
-        print("perlin-numpy is not available, returning checkerboard instead.")
-        return create_checkers_shape(size)  # Fallback if perlin-numpy is not installed
+    
+    res = random.choice([2, 4, 8])
 
     scaled_size_float = size * scale  # Calculate scaled size as float first
     scaled_size = int(scaled_size_float)  # Convert to int
     scaled_size = (scaled_size // res) * res  # Ensure scaled_size is a multiple of res (integer division then multiply)
+    if scaled_size % 2 == 1:
+        scaled_size -= 1
     if scaled_size == 0:  # Handle case where scaling makes size too small
         scaled_size = res  # Ensure it's at least res if scale is very small
 
@@ -871,7 +865,12 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     if seed is not None:
         np.random.seed(seed)  # Seed for reproducibility
 
-    noise = pnp.generate_fractal_noise_2d((scaled_size, scaled_size), res=(res, res), octaves=octaves, persistence=persistence, lacunarity=1)  # Ensure lacunarity is int
+    try:
+        noise = pnp.generate_perlin_noise_2d((scaled_size, scaled_size), res=(res, res))
+    except Exception as e:
+        print(f"Error generating Perlin noise: {e}")
+        return create_blob_shape(size)  # Return fallback checkerboard
+        
     normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(np.uint8)  # Noise generated on scaled size
 
     perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size
