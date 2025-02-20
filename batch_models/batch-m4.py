@@ -24,7 +24,6 @@ import matplotlib.pyplot as plt
 import perlin_numpy as pnp
 import math
 from PIL import Image
-import numba
 import wandb
 
 import torch
@@ -119,56 +118,47 @@ def vector_field():
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def translation_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return np.ones_like(X), np.zeros_like(Y)
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def rotation_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return -Y, X
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def shear_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return np.ones_like(X), X
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def shear_field2(X, Y):
     return Y, np.zeros_like(Y)
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def scale_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return X, Y
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def gradient_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return X**2, Y**2
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def gradient_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
     field = X**2 + Y**2
     return np.gradient(field, axis=0) * 10, np.gradient(field, axis=1) * 10
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def harmonic_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return np.sin(X), np.cos(Y)
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def harmonic_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
     innerX = 2 * np.pi * X
     innerY = 2 * np.pi * Y
@@ -176,7 +166,6 @@ def harmonic_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def pearling_field(X: np.ndarray, Y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     epsilon = 0.1  # Small smoothing factor
     r = np.sqrt(X**2 + Y**2 + epsilon**2)  # Smoothed radius
@@ -184,14 +173,12 @@ def pearling_field(X: np.ndarray, Y: np.ndarray) -> Tuple[np.ndarray, np.ndarray
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def vortex_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     r = np.sqrt(X**2 + Y**2)
     return -Y / (r**2 + 0.1), X / (r**2 + 0.1)
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     noise_x = pnp.generate_fractal_noise_2d((X.shape[0], X.shape[1]), res=(1, 1), octaves=4)
     noise_y = pnp.generate_fractal_noise_2d((X.shape[0], X.shape[1]), res=(1, 1), octaves=4)
@@ -199,7 +186,6 @@ def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def swirl_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     epsilon = 0.1  # Small smoothing factor
     radius = np.sqrt(X**2 + Y**2 + epsilon**2)  # Smoothed radius
@@ -213,7 +199,6 @@ def swirl_field(X: farray, Y: farray) -> Tuple[farray, farray]:
 
 
 @vector_field()
-@numba.jit(nopython=True)
 def vortex_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
     radius = np.sqrt(X**2 + Y**2)
     angle = np.arctan2(Y, X)
