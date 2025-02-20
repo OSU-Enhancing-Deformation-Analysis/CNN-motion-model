@@ -48,13 +48,13 @@ TILES_DIR = "./tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
 # MAX_TILES = 100  # For just quick tests
-MAX_TILES = 50000  # For running all the images
+MAX_TILES = 17556  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
 TILE_SIZE = 256
 
 # Dataset parameters
-VARIATIONS_PER_IMAGE = 10
+VARIATIONS_PER_IMAGE = 1
 
 # Training parameters
 # EPOCHS = 10 # Use this or MAX_TIME
@@ -870,7 +870,7 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     except Exception as e:
         print(f"Error generating Perlin noise: {e}")
         return create_blob_shape(size)  # Return fallback checkerboard
-        
+
     normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(np.uint8)  # Noise generated on scaled size
 
     perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size
@@ -1014,6 +1014,8 @@ shape_functions = [
 
 
 # %%
+current_epoch = 0
+
 class CustomDataset(Dataset):
     def __init__(self, variations_per_image: int = 10, validate: bool = False):
         self.variations_per_image = variations_per_image
@@ -1034,11 +1036,17 @@ class CustomDataset(Dataset):
         # Where n is the number of images
         # And v is the variation number
 
+        global current_epoch
+
         # Get the image index
         path_index = index % NUM_TILES
         if self.validate:
             index += 10000000
-        random.seed(index)
+        
+        if (self.validate):
+            random.seed(index)
+        else:
+            random.seed(index + (current_epoch * NUM_TILES * self.variations_per_image))
 
         self.composer.clear()
 
@@ -1297,6 +1305,7 @@ training_start_time = time.time()
 
 while keep_training:
     epoch += 1
+    current_epoch = epoch
 
     print(f"Epoch {epoch+1}\n-------------------------------")
     model.train()
