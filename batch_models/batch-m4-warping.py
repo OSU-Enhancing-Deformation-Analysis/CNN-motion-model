@@ -61,7 +61,7 @@ EPOCHS = None
 MAX_TIME = 10 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
-BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13)
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 2)
 # BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001

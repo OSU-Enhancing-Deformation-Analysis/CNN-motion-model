@@ -61,7 +61,7 @@ EPOCHS = None
 MAX_TIME = 10 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
-BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13)
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 2)
 # BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
@@ -866,7 +866,7 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     except Exception as e:
         print(f"Error generating Perlin noise: {e}")
         return create_blob_shape(size)  # Return fallback checkerboard
-        
+
     normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(np.uint8)  # Noise generated on scaled size
 
     perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size

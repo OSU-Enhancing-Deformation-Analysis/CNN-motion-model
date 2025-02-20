@@ -1,7 +1,7 @@
 # %% [markdown]
 # ### Imports
 
-#  This model changes the loss function of the correlation model
+#  This model adds a correlation layer to the m4 model.
 #
 
 # %%
@@ -1063,6 +1063,8 @@ class CustomDataset(Dataset):
                 shape_morph_composer.add_field(field_type, randomize=True)
 
             morphed_shape, _field = shape_morph_composer.apply_to_image(shape_layer)
+            morphed_shape = gaussian_filter(morphed_shape, sigma=1)
+            morphed_shape = (morphed_shape * (255 / np.max(morphed_shape))).astype(np.uint8)  # Normalize after blurring
             morphed_shape = morphed_shape.astype(np.float32) / 255
 
             if random.random() > 0.5:
@@ -1287,17 +1289,8 @@ print(model)
 
 # %%
 def custom_loss(predicted_vectors, target_vectors):
-    # l1_loss = nn.functional.l1_loss(predicted_vectors, target_vectors)
-    # return l1_loss
-
-    squared_difference = (predicted_vectors - target_vectors)**2
-
-    epe_map = torch.sqrt(squared_difference.sum(dim=1)) # N, H, W - EPE for each pixel
-
-    # Average EPE over all pixels and batch
-    epe_loss = epe_map.mean()
-
-    return epe_loss
+    l1_loss = nn.functional.l1_loss(predicted_vectors, target_vectors)
+    return l1_loss
 
 
 # %%
