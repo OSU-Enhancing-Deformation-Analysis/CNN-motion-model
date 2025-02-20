@@ -1235,7 +1235,7 @@ class MotionVectorRegressionNetwork(nn.Module):
         self.max_displacement = max_displacement  # Store max_displacement
 
         self.feature_convolution = nn.Sequential(
-            ConvolutionBlock(input_images, 32, kernel_size=3),  # input_images (2) -> 32 channels
+            ConvolutionBlock(1, 32, kernel_size=3),  # input_images (1) -> 32 channels
             nn.MaxPool2d(kernel_size=2),  # scales down by half
             ConvolutionBlock(32, 64, kernel_size=3),  # 32 -> 64 channels
             nn.MaxPool2d(kernel_size=2),  # scales down by half
