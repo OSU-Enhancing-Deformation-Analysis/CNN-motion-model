@@ -1262,7 +1262,7 @@ class DeeperWiderMotionVectorRegressionNetwork(nn.Module):
         return x
         
 class AttentionDeeperWiderMotionVectorRegressionNetwork(DeeperWiderMotionVectorRegressionNetwork):  # Inherit DeeperWider for structure
-    def __init__(self, input_images=2, base_channels=64, num_conv_blocks=5):
+    def __init__(self, input_images=2, base_channels=64, num_conv_blocks=3):
         super().__init__(input_images=input_images, base_channels=base_channels, num_conv_blocks=num_conv_blocks)
         # Insert Attention after the convolutional layers in the deeper/wider model
         channels = base_channels * (2**num_conv_blocks)

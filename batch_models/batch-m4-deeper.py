@@ -1194,7 +1194,7 @@ class ConvolutionBlock(nn.Module):
 
 
 class DeeperWiderMotionVectorRegressionNetwork(nn.Module):
-    def __init__(self, input_images=2, base_channels=64, num_conv_blocks=5):  # Parameters for depth and width
+    def __init__(self, input_images=2, base_channels=64, num_conv_blocks=3):  # Parameters for depth and width
         super().__init__()
         self.input_images = input_images
         self.vector_channels = 2
