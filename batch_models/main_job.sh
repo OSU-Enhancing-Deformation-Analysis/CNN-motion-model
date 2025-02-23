@@ -9,21 +9,14 @@
 # Define variables
 BATCH_FILE="batchfile-here.py"
 MODEL_NAME="b3-[namehere]"
-TOKEN_FILE=~/capstone/hpc_github_token
 # DATASET=~/hpc-share/tiles/gDenoised/ Will copy this folder. options: gDenoised, gRaw, sDenoised, sRaw
 DATASET=~/hpc-share/tiles/gDenoised/
 GITHUB_URL="https://raw.githubusercontent.com/OSU-Enhancing-Deformation-Analysis/CNN-motion-model/refs/heads/main/batch_models/$BATCH_FILE"
 PYTHON_ENV=~/hpc-share/capstone_model_training/bin/activate
 
-# Read the GitHub token
-if [[ ! -f "$TOKEN_FILE" ]]; then
-    echo "Error: Token file not found!"
-    exit 1
-fi
-TOKEN=$(cat "$TOKEN_FILE")
 
 # Download the batch file using wget with the token
-wget --header="Authorization: token $TOKEN" -O "$BATCH_FILE" "$GITHUB_URL"
+wget -O "$BATCH_FILE" "$GITHUB_URL"
 if [[ $? -ne 0 ]]; then
     echo "Error: Failed to download batch file!"
     exit 1
