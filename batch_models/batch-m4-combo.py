@@ -63,10 +63,10 @@ VARIATIONS_PER_IMAGE = 1
 
 EPOCHS = None
 # MAX_TIME = 15  # In seconds | Use this or EPOCHS
-MAX_TIME = 10 * 60 * 60  # In seconds | Use this or EPOCHS
+MAX_TIME = 100 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
-BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 2)
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 6)
 # BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
@@ -221,7 +221,7 @@ class VectorField:
         self.center = (random.random() * 2 - 1, random.random() * 2 - 1)
         self.scale = random.uniform(0.8, 2.0)
         self.rotation = random.random() * 2 * np.pi
-        self.amplitude = random.uniform(0.75, 2.0)
+        self.amplitude = random.uniform(0.25, .75)
 
     def apply(self, X: farray, Y: farray) -> Tuple[farray, farray]:
         X_scaled = X * self.scale
@@ -962,7 +962,7 @@ def create_stripes_pattern_shape(size, stripe_width_param=None, angle=None, posi
     if stripe_width_param is None:
         stripe_width_param = random.randint(4, 16)  # Random stripe width
     if angle is None:
-        angle = random.choice([0, 90])  # Random angle (vertical or horizontal)
+        angle = random.uniform(0, 90)  # Random angle (vertical or horizontal)
     if position is None:
         position_x = random.randint(-size // 2, size // 2)
         position_y = random.randint(-size // 2, size // 2)
@@ -1076,6 +1076,10 @@ class CustomDataset(Dataset):
                 shape_morph_composer.add_field(field_type, randomize=True)
 
             morphed_shape, _field = shape_morph_composer.apply_to_image(shape_layer)
+            if (random.random() > 0.3):
+                morphed_shape = gaussian_filter(morphed_shape, sigma=1)
+                morphed_shape = (morphed_shape * (255 / np.max(morphed_shape))).astype(np.uint8)  # Normalize after blurring
+
             morphed_shape = morphed_shape.astype(np.float32) / 255
 
             if random.random() > 0.5:
@@ -1313,8 +1317,9 @@ class ComboMotionVectorRegressionNetwork(nn.Module):
 
 
 model = ComboMotionVectorRegressionNetwork(input_images=2).to(device)
+if os.path.exists(MODEL_FILE):
+    model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
 print(model)
-
 
 # %%
 def custom_loss(predicted_vectors, target_vectors):

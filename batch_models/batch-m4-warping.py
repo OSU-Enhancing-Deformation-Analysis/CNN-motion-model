@@ -44,13 +44,13 @@ TILES_DIR = "./tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
 # MAX_TILES = 100  # For just quick tests
-MAX_TILES = 50000  # For running all the images
+MAX_TILES = 17556  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
 TILE_SIZE = 256
 
 # Dataset parameters
-VARIATIONS_PER_IMAGE = 10
+VARIATIONS_PER_IMAGE = 1
 
 # Training parameters
 # EPOCHS = 10 # Use this or MAX_TIME
@@ -216,7 +216,7 @@ class VectorField:
         self.center = (random.random() * 2 - 1, random.random() * 2 - 1)
         self.scale = random.uniform(0.8, 2.0)
         self.rotation = random.random() * 2 * np.pi
-        self.amplitude = random.uniform(0.75, 2.0)
+        self.amplitude = random.uniform(0.25, .75)
 
     def apply(self, X: farray, Y: farray) -> Tuple[farray, farray]:
         X_scaled = X * self.scale
@@ -866,7 +866,7 @@ def create_perlin_noise_shape(size, octaves=None, persistence=None, lacunarity=N
     except Exception as e:
         print(f"Error generating Perlin noise: {e}")
         return create_blob_shape(size)  # Return fallback checkerboard
-        
+
     normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(np.uint8)  # Noise generated on scaled size
 
     perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size
@@ -957,7 +957,7 @@ def create_stripes_pattern_shape(size, stripe_width_param=None, angle=None, posi
     if stripe_width_param is None:
         stripe_width_param = random.randint(4, 16)  # Random stripe width
     if angle is None:
-        angle = random.choice([0, 90])  # Random angle (vertical or horizontal)
+        angle = random.uniform(0, 90)  # Random angle (vertical or horizontal)
     if position is None:
         position_x = random.randint(-size // 2, size // 2)
         position_y = random.randint(-size // 2, size // 2)
@@ -1010,6 +1010,8 @@ shape_functions = [
 
 
 # %%
+current_epoch = 0
+
 class CustomDataset(Dataset):
     def __init__(self, variations_per_image: int = 10, validate: bool = False):
         self.variations_per_image = variations_per_image
@@ -1030,11 +1032,17 @@ class CustomDataset(Dataset):
         # Where n is the number of images
         # And v is the variation number
 
+        global current_epoch
+
         # Get the image index
         path_index = index % NUM_TILES
         if self.validate:
             index += 10000000
-        random.seed(index)
+        
+        if (self.validate):
+            random.seed(index)
+        else:
+            random.seed(index + (current_epoch * NUM_TILES * self.variations_per_image))
 
         self.composer.clear()
 
@@ -1063,6 +1071,10 @@ class CustomDataset(Dataset):
                 shape_morph_composer.add_field(field_type, randomize=True)
 
             morphed_shape, _field = shape_morph_composer.apply_to_image(shape_layer)
+            if (random.random() > 0.3):
+                morphed_shape = gaussian_filter(morphed_shape, sigma=1)
+                morphed_shape = (morphed_shape * (255 / np.max(morphed_shape))).astype(np.uint8)  # Normalize after blurring
+
             morphed_shape = morphed_shape.astype(np.float32) / 255
 
             if random.random() > 0.5:
@@ -1335,9 +1347,12 @@ class MotionVectorRegressionNetworkWithWarping(nn.Module): # Model 3: Model 1 + 
         return meshgrid.permute(0, 2, 3, 1) # N, H, W, 2 - channels last for grid_sample
 
 
-model = MotionVectorRegressionNetworkWithWarping(input_images=2, max_displacement=20).to(device)
-print(model)
 
+
+model = MotionVectorRegressionNetworkWithWarping(input_images=2, max_displacement=20).to(device)
+if os.path.exists(MODEL_FILE):
+    model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
+print(model)
 
 # %%
 def custom_loss(predicted_vectors, target_vectors):
@@ -1369,7 +1384,7 @@ wandb_config = {
         "train": len(training_dataset),
         "val": len(validation_dataset),
     },
-    "loss_function": "L1",
+    "loss_function": "EPE",
     "optimizer": "Adam",
     "scheduler": {
         "type": "ReduceLROnPlateau",
@@ -1424,6 +1439,7 @@ training_start_time = time.time()
 
 while keep_training:
     epoch += 1
+    current_epoch = epoch
 
     print(f"Epoch {epoch+1}\n-------------------------------")
     model.train()
