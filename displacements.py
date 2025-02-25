@@ -109,64 +109,6 @@ def vortex_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return -Y / (r**2 + 0.1), X / (r**2 + 0.1)
 
 
-# @vector_field()
-def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    scaled_X = X / 2
-    scaled_Y = Y / 2
-
-    # Generate separate Perlin noise for X and Y components
-    u = perlin(scaled_X, scaled_Y, seed=0) - 0.5
-    v = perlin(scaled_Y, scaled_X, seed=1) - 0.5
-    return u, v
-
-
-# @vector_field()
-def noise_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return np.random.normal(0, 0.5, size=(X.shape[0], X.shape[1])).astype(
-        np.float32
-    ), np.random.normal(0, 0.5, size=(Y.shape[0], Y.shape[1])).astype(np.float32)
-
-
-def perlin(x: farray, y: farray, seed: int = 0) -> farray:
-    # permutation table
-    np.random.seed(seed)
-    p = np.arange(256, dtype=np.int32)
-    np.random.shuffle(p)
-    p = np.stack([p, p]).flatten()
-    # coordinates of the top-left
-    xi, yi = np.floor(x), np.floor(y)
-    # internal coordinates
-    xf, yf = (x - xi).astype(np.float32), (y - yi).astype(np.float32)
-    # fade factors
-    u, v = perlin_fade(xf), perlin_fade(yf)
-    # noise components
-    n00 = perlin_gradient(p[p[xi] + yi], xf, yf)
-    n01 = perlin_gradient(p[p[xi] + yi + 1], xf, yf - 1)
-    n11 = perlin_gradient(p[p[xi + 1] + yi + 1], xf - 1, yf - 1)
-    n10 = perlin_gradient(p[p[xi + 1] + yi], xf - 1, yf)
-    # combine noises
-    x1 = perlin_lerp(n00, n10, u)
-    x2 = perlin_lerp(n01, n11, u)  # FIX1: I was using n10 instead of n01
-    return perlin_lerp(x1, x2, v)  # FIX2: I also had to reverse x1 and x2 here
-
-
-def perlin_lerp(a: farray, b: farray, x: farray) -> farray:
-    "linear interpolation"
-    return a + x * (b - a)
-
-
-def perlin_fade(t: farray) -> farray:
-    "6t^5 - 15t^4 + 10t^3"
-    return 6 * t**5 - 15 * t**4 + 10 * t**3
-
-
-def perlin_gradient(h: npt.NDArray[np.int32], x: farray, y: farray) -> farray:
-    "grad converts h to the right gradient vector and return the dot product with (x,y)"
-    vectors = np.array([[0, 1], [0, -1], [1, 0], [-1, 0]], dtype=np.int32)
-    g = vectors[h % 4]
-    return g[:, :, 0] * x + g[:, :, 1] * y
-
-
 @dataclass
 class VectorField:
     name: str

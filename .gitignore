@@ -177,3 +177,4 @@ cython_debug/
 # Generated images
 generated_images/
 wandb/
+model_files/
