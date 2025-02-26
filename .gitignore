@@ -178,3 +178,4 @@ cython_debug/
 generated_images/
 wandb/
 model_files/
+model_outputs/
