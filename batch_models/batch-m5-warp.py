@@ -90,8 +90,6 @@ if not os.path.exists(MODEL_NAME):
 # %%
 from dataclasses import dataclass
 from scipy.spatial import (
-    Voronoi,
-    voronoi_plot_2d,
     ConvexHull,
 )  # Correct import for ConvexHull
 from scipy.ndimage import map_coordinates, gaussian_filter
@@ -168,7 +166,12 @@ def harmonic_field(X: farray, Y: farray) -> Tuple[farray, farray]:
 def harmonic_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
     innerX = 0.75 * np.pi * X
     innerY = 0.75 * np.pi * Y
-    return (np.sin(innerX) * np.cos(innerY)), (-np.cos(innerX) * np.sin(innerY))
+    sinX: farray = np.sin(innerX)
+    cosX: farray = np.cos(innerX)
+    sinY: farray = np.sin(innerY)
+    cosY: farray = np.cos(innerY)
+
+    return (sinX * cosY), (-cosX * sinY)
 
 
 @vector_field()
@@ -191,8 +194,10 @@ def swirl_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     angle = np.arctan2(Y, X)
 
     magnitude = np.tanh(radius)  # Scales velocity smoothly to 0 at origin
-    dx = magnitude * np.cos(angle + radius)
-    dy = magnitude * np.sin(angle + radius)
+    dx: farray = np.cos(angle + radius)
+    dy: farray = np.sin(angle + radius)
+    dx *= magnitude
+    dy *= magnitude
 
     return dx, dy
 
@@ -287,8 +292,8 @@ class VectorFieldComposer:
     ) -> Tuple[npt.NDArray[np.uint8], npt.NDArray[np.float32]]:
         dU, dV = self.compute_combined_field()
 
-        new_x = self.pos_x - dU * 10
-        new_y = self.pos_y - dV * 10
+        new_x = self.pos_x - dU
+        new_y = self.pos_y - dV
 
         warped_image = map_coordinates(
             image,
@@ -998,77 +1003,6 @@ def create_perlin_noise_shape(
     return perlin_array
 
 
-def create_voronoi_pattern_shape(
-    size, num_points_param=None, position=None, scale=None, rotation=None
-):
-    """Creates a Voronoi pattern with randomized point count, position, scale, and rotation (scale/position effect)."""
-    if num_points_param is None:
-        num_points_param = random.randint(10, 30)  # Random point count
-    if position is None:
-        position_x = random.randint(-size // 2, size // 2)
-        position_y = random.randint(-size // 2, size // 2)
-        position = (position_x, position_y)
-    if scale is None:
-        scale = random.uniform(0.5, 2.0)
-    if rotation is None:
-        rotation = random.uniform(
-            0, 2 * np.pi
-        )  # Rotation for Voronoi orientation (image rotation)
-
-    scaled_size = int(size * scale)  # Scale the Voronoi region size
-    offset_x = position[0] + (size - scaled_size) // 2  # Position offset
-    offset_y = position[1] + (size - scaled_size) // 2
-
-    points_scaled = np.random.randint(
-        0, scaled_size, size=(num_points_param, 2)
-    )  # Points generated on scaled region
-    vor = Voronoi(points_scaled)
-    voronoi_array_scaled = np.zeros(
-        (scaled_size, scaled_size), dtype=np.uint8
-    )  # Voronoi calculated on scaled size
-
-    for r in range(scaled_size):
-        for c in range(scaled_size):
-            point = np.array([c, r])
-            min_dist = float("inf")
-            closest_region_index = -1
-            for i, p in enumerate(vor.points):
-                dist = np.linalg.norm(point - p)
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_region_index = i
-            if closest_region_index != -1:
-                voronoi_array_scaled[r, c] = int(
-                    (closest_region_index / num_points_param) * 255
-                )
-
-    voronoi_array = np.zeros(
-        (size, size), dtype=np.uint8
-    )  # Final image array is full size
-
-    # --- Clamping and adjusting slice indices ---
-    start_y = max(0, offset_y)
-    start_x = max(0, offset_x)
-    end_y = min(size, offset_y + scaled_size)
-    end_x = min(size, offset_x + scaled_size)
-
-    source_start_y = 0 if offset_y >= 0 else -offset_y
-    source_start_x = 0 if offset_x >= 0 else -offset_x
-
-    target_height = end_y - start_y
-    target_width = end_x - start_x
-
-    source_end_y = source_start_y + target_height
-    source_end_x = source_start_x + target_width
-
-    # Paste scaled Voronoi into final image with offset, using clamped indices and adjusted source slice
-    voronoi_array[start_y:end_y, start_x:end_x] = voronoi_array_scaled[
-        source_start_y:source_end_y, source_start_x:source_end_x
-    ]
-
-    return voronoi_array
-
-
 def create_stripes_pattern_shape(
     size, stripe_width_param=None, angle=None, position=None, scale=None
 ):
@@ -1122,7 +1056,6 @@ shape_functions = [
     create_random_concave_shape,
     create_radial_pattern_shape,
     create_wave_pattern_shape,
-    create_voronoi_pattern_shape,
     create_perlin_noise_shape,
     create_stripes_pattern_shape,
 ]
@@ -1164,8 +1097,6 @@ class CustomDataset(Dataset):
         path_index = index % NUM_TILES
         if self.validate:
             index += 10000000
-
-        if self.validate:
             random.seed(index)
         else:
             random.seed(index + (current_epoch * NUM_TILES * self.variations_per_image))
@@ -1180,17 +1111,17 @@ class CustomDataset(Dataset):
         computed_field = np.array(self.composer.compute_combined_field())
 
         # New Variations
-        if random.random() > 0.25:
+        if random.random() > 0.4:
             # Adding a shape layer
             shape_function = random.choice(shape_functions)
             shape_layer = shape_function(TILE_SIZE)  # Image as uint8 0-255
 
             if random.random() > 0.5:
-                original_image = 255 - shape_layer  # Invert mask
+                shape_layer = 255 - shape_layer  # Invert mask
 
             # Morph the image
-            shape_morph_composer = VectorFieldComposer()
-
+            self.composer.clear()
+            shape_morph_composer = self.composer
             num_fields = random.randint(1, 2)
             for _ in range(num_fields):
                 field_type = random.choice(self.available_fields)
@@ -1233,17 +1164,19 @@ class CustomDataset(Dataset):
 
         dU, dV = final_field
 
-        new_x = self.pos_x - dU * 10
-        new_y = self.pos_y - dV * 10
+        new_x = self.pos_x - dU
+        new_y = self.pos_y - dV
 
+        denoised_image, extracted_noise = extract_wavelet_noise(img_as_float(image))
         warped_image = map_coordinates(
-            image,
+            denoised_image,
             [new_y, new_x],
             order=0,
             mode="wrap",
         )
+        applied_denoised_image = np.clip(warped_image + extracted_noise, 0, 1)
 
-        return np.array([image, warped_image]).astype(np.float32), np.array(
+        return np.array([image, applied_denoised_image]).astype(np.float32), np.array(
             [dU, dV]
         ).astype(np.float32)
 
