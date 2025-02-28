@@ -49,7 +49,7 @@ print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 TILES_DIR = "./tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
-# MAX_TILES = 100  # For just quick tests
+# MAX_TILES = 50  # For just quick tests
 MAX_TILES = 17556  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
@@ -67,7 +67,7 @@ EPOCHS = None
 MAX_TIME = 20 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
-BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 4)
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 6)
 # BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
@@ -80,8 +80,8 @@ else:
     MODEL_NAME = sys.argv[1]
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
-if not os.path.exists(MODEL_NAME):
-    os.makedirs(MODEL_NAME)
+# if not os.path.exists(MODEL_NAME):
+#     os.makedirs(MODEL_NAME)
 
 # %% [markdown]
 # # Dataset
@@ -1160,14 +1160,16 @@ class CustomDataset(Dataset):
         else:
             final_field = computed_field
 
-        image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        image = img_as_float(
+            np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        )
 
         dU, dV = final_field
 
         new_x = self.pos_x - dU
         new_y = self.pos_y - dV
 
-        denoised_image, extracted_noise = extract_wavelet_noise(img_as_float(image))
+        denoised_image, extracted_noise = extract_wavelet_noise(image)
         warped_image = map_coordinates(
             denoised_image,
             [new_y, new_x],
@@ -1233,12 +1235,8 @@ training_dataloader = DataLoader(
     training_dataset,
     batch_size=BATCH_SIZE,
     shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=True,
 )
-validation_dataloader = DataLoader(
-    validation_dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=True
-)
+validation_dataloader = DataLoader(validation_dataset, batch_size=BATCH_SIZE)
 
 for x, y in training_dataloader:
     print(f"Shape of X [N, C, H, W]: {x.shape}")
@@ -1690,9 +1688,11 @@ while keep_training:
                 base_image = np.transpose(base_image, (1, 2, 0))
                 morph_image = np.array((images[1].cpu().numpy(),) * 3)
                 morph_image = np.transpose(morph_image, (1, 2, 0))
-                combined = np.hstack(
-                    (base_image, morph_image, converted_y * 256, converted_pred * 256)
-                ).astype(np.uint8)
+                combined = (
+                    np.hstack((base_image, morph_image, converted_y, converted_pred))
+                    * 256
+                )
+                combined = combined.astype(np.uint8)
 
                 wandb.log(
                     {

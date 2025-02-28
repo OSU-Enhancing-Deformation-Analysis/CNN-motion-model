@@ -1,8 +1,8 @@
 # %% [markdown]
 # ### Imports
 
-#  This model adds some warping thing to epe loss model
-#
+#  This model impliments the VideoFlow model from https://github.com/XiaoyuShi97/VideoFlow
+# Paper: https://arxiv.org/pdf/2303.08340
 
 # %%
 import os
@@ -73,9 +73,9 @@ EPOCHS = None
 # MAX_TIME = 15  # In seconds | Use this or EPOCHS
 MAX_TIME = 20 * 60 * 60  # In seconds | Use this or EPOCHS
 
-# ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
-BATCH_SIZE = 8
-# BATCH_SIZE = 240  # Fills 32 GB VRAM
+# ( GB - 0.5 (buffer)) / 1.4 = BATCH_SIZE
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 1.4)
+# BATCH_SIZE = 20  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 25e-5
 SAVE_FREQUENCY = 1  # Writes a checkpoint file
@@ -87,8 +87,6 @@ else:
     MODEL_NAME = sys.argv[1]
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
-if not os.path.exists(MODEL_NAME):
-    os.makedirs(MODEL_NAME)
 
 # %% [markdown]
 # # Dataset
@@ -153,15 +151,15 @@ def scale_field(X: farray, Y: farray) -> Tuple[farray, farray]:
     return X, Y
 
 
-@vector_field()
-def gradient_field(X: farray, Y: farray) -> Tuple[farray, farray]:
-    return X**2, Y**2
+# @vector_field()
+# def gradient_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+#     return X**2, Y**2
 
 
-@vector_field()
-def gradient_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
-    field = X**2 + Y**2
-    return np.gradient(field, axis=0) * 10, np.gradient(field, axis=1) * 10
+# @vector_field()
+# def gradient_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
+#     field = X**2 + Y**2
+#     return np.gradient(field, axis=0) * 10, np.gradient(field, axis=1) * 10
 
 
 @vector_field()
@@ -1089,6 +1087,8 @@ class CustomDataset(Dataset):
         self.pos_x, self.pos_y = np.meshgrid(np.arange(TILE_SIZE), np.arange(TILE_SIZE))
 
     def __len__(self):
+        if self.validate:
+            return NUM_TILES * self.variations_per_image // 10
         return NUM_TILES * self.variations_per_image
 
     def __getitem__(self, index):
@@ -1167,7 +1167,9 @@ class CustomDataset(Dataset):
         else:
             final_field = computed_field
 
-        image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        image = img_as_float(
+            np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        )
 
         dU, dV = final_field
 
@@ -1183,9 +1185,26 @@ class CustomDataset(Dataset):
         )
         applied_denoised_image = np.clip(warped_image + extracted_noise, 0, 1)
 
-        return np.array([image, applied_denoised_image]).astype(np.float32), np.array(
-            [dU, dV]
-        ).astype(np.float32)
+        # Add a random adjustment to the before image
+        new_x = new_x + random.uniform(-0.1, 0.1)
+        new_y = new_y + random.uniform(-0.1, 0.1)
+        backwards_warped_image = map_coordinates(
+            denoised_image,
+            [-new_y, -new_x],
+            order=0,
+            mode="wrap",
+        )
+        before_image = np.clip(backwards_warped_image + extracted_noise, 0, 1)
+
+        before_image = np.expand_dims(before_image, axis=0)
+        image = np.expand_dims(image, axis=0)
+        applied_denoised_image = np.expand_dims(applied_denoised_image, axis=0)
+
+        dU = np.expand_dims(dU, axis=0)
+        dV = np.expand_dims(dV, axis=0)
+        return np.array([before_image, image, applied_denoised_image]).astype(
+            np.float32
+        ), np.array([dU, dV]).astype(np.float32)
 
 
 # %%
@@ -1246,12 +1265,6 @@ training_dataloader = DataLoader(
 validation_dataloader = DataLoader(
     validation_dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=True
 )
-
-for x, y in training_dataloader:
-    print(f"Shape of X [N, C, H, W]: {x.shape}")
-    print(f"Shape of y: {y.shape} {y.dtype}")
-    break
-
 
 # %% [markdown]
 # # Model
@@ -1739,8 +1752,6 @@ class MOFNet(nn.Module):
             args=self.cfg, hidden_dim=128 // hidden_dim_ratio
         )
 
-        gma_down_ratio = 256 // cfg.feat_dim
-
         self.att = Attention(
             args=self.cfg,
             dim=128 // hidden_dim_ratio,
@@ -1802,6 +1813,7 @@ class MOFNet(nn.Module):
         down_ratio = self.cfg.down_ratio
 
         B, N, _, H, W = images.shape
+        print("Image Shape", images.shape)
 
         images = 2 * (images / 255.0) - 1.0
 
@@ -1923,7 +1935,7 @@ class MOFNet(nn.Module):
         if self.training:
             return flow_predictions
         else:
-            return flow_predictions[-1], flow_predictions[-1]
+            return flow_predictions[-1]
 
 
 # %%
@@ -1950,7 +1962,7 @@ print(model)
 
 
 # %%
-def sequence_loss(flow_preds, flow_gt) -> Tuple[float, Tensor]:
+def sequence_loss(flow_preds: List[Tensor], flow_gt: Tensor) -> Tuple[Tensor, float]:
     """Loss function defined over sequence of flow predictions"""
 
     # print(flow_gt.shape, valid.shape, flow_preds[0].shape)
@@ -1959,7 +1971,7 @@ def sequence_loss(flow_preds, flow_gt) -> Tuple[float, Tensor]:
     gamma = 0.8
     max_flow = 400
     n_predictions = len(flow_preds)
-    flow_loss = 0.0
+    flow_loss: Tensor = torch.zeros(1, device=flow_gt.device)
 
     B, N, _, H, W = flow_gt.shape
 
@@ -1979,6 +1991,7 @@ def sequence_loss(flow_preds, flow_gt) -> Tuple[float, Tensor]:
 
     epe = torch.sum((flow_preds[-1] - flow_gt) ** 2, dim=2).sqrt()
     epe = epe.view(-1)[valid.view(-1)]
+    epe = epe.mean().item()
 
     return flow_loss, epe
 
@@ -2046,7 +2059,7 @@ for s in seeds:
 
 
 # List of tuples of (images, vectors)
-samples_images = torch.from_numpy(np.array(samples_images)).float()
+samples_images = torch.from_numpy(np.array(samples_images)).float().to(device)
 
 # %%
 
@@ -2069,10 +2082,11 @@ while keep_training:
         batch_images, batch_vectors = batch_images.to(device), batch_vectors.to(device)
 
         # Compute prediction error
+        print(batch_images.shape)
         pred = model(batch_images)
-        loss, metrics, NAN_flag = sequence_loss(pred, batch_vectors)
+        loss, epe = sequence_loss(pred, batch_vectors)
 
-        scaler.scale(Tensor(loss)).backward()
+        scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         total_grads = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
@@ -2081,17 +2095,17 @@ while keep_training:
 
         wandb.log(
             {
-                "batch/train_loss": loss,
+                "batch/train_loss": epe,
                 "batch/gradient_norm": total_grads,
                 "batch/learning_rate": optimizer.param_groups[0]["lr"],
             }
         )
 
-        epoch_training_losses.append(loss)
+        epoch_training_losses.append(epe)
 
         if batch > (milestone * 100):
             milestone += 1
-            print(f"loss: { loss:>7f}  [{batch:>5d}/{size:>5d}]")
+            print(f"loss: { epe:>7f}  [{batch:>5d}/{size:>5d}]")
 
     model.eval()
     validation_losses = []
@@ -2103,8 +2117,8 @@ while keep_training:
             )
 
             pred = model(batch_images)
-            loss, metrics, nan = sequence_loss(pred, batch_vectors)
-            validation_losses.append(loss.item())
+            loss, epe = sequence_loss(pred, batch_vectors)
+            validation_losses.append(epe)
 
     average_trianing_loss = np.mean(epoch_training_losses)
     average_validation_loss = np.mean(validation_losses)
@@ -2129,12 +2143,13 @@ while keep_training:
             model_artifact.add_file("snapshot_save.pt")
             wandb.log_artifact(model_artifact)
 
-            sample_predictions = model(samples_images.to(device))
+            sample_predictions = model(samples_images)
 
             for i, images in enumerate(samples_images):
                 vectors = samples_vectors[i]
+                print(sample_predictions[0].shape)
 
-                converted_y = vectors
+                converted_y = vectors.squeeze(1)
                 converted_y = np.vstack(
                     (
                         converted_y,
@@ -2146,7 +2161,7 @@ while keep_training:
                     converted_y.max() - converted_y.min()
                 )
 
-                converted_pred = sample_predictions[i].cpu().numpy()
+                converted_pred = sample_predictions[i][0].cpu().numpy()
                 converted_pred = np.vstack(
                     (
                         converted_pred,
@@ -2158,13 +2173,31 @@ while keep_training:
                     converted_pred.max() - converted_pred.min()
                 )
 
-                base_image = np.array((images[0].cpu().numpy(),) * 3)
+                base_image = images[0].cpu().numpy()
+                base_image = np.repeat(base_image, 3, axis=0)
                 base_image = np.transpose(base_image, (1, 2, 0))
-                morph_image = np.array((images[1].cpu().numpy(),) * 3)
+                print("Base Image Shape", base_image)
+                morph_image = images[1].cpu().numpy()
+                morph_image = np.repeat(morph_image, 3, axis=0)
                 morph_image = np.transpose(morph_image, (1, 2, 0))
-                combined = np.hstack(
-                    (base_image, morph_image, converted_y * 256, converted_pred * 256)
-                ).astype(np.uint8)
+                print("Morph Image Shape", morph_image)
+                morph2_image = images[2].cpu().numpy()
+                morph2_image = np.repeat(morph2_image, 3, axis=0)
+                morph2_image = np.transpose(morph2_image, (1, 2, 0))
+                print("Morph2 Image Shape", morph2_image)
+                combined = (
+                    np.hstack(
+                        (
+                            base_image,
+                            morph_image,
+                            morph2_image,
+                            converted_y,
+                            converted_pred,
+                        )
+                    )
+                    * 256
+                )
+                combined = combined.astype(np.uint8)
 
                 wandb.log(
                     {
@@ -2180,19 +2213,27 @@ while keep_training:
 
             for tile in tiles:
                 tile_sequence_paths = sequence_arrays[sequence_name][tile]
+                pre_image_path = tile_sequence_paths[frame_start - 1]
                 base_image_path = tile_sequence_paths[frame_start]
                 next_time_path = tile_sequence_paths[frame_start + 1]
 
+                pre_image = np.array(Image.open(pre_image_path))
                 base_image = np.array(Image.open(base_image_path))
                 next_time = np.array(Image.open(next_time_path))
 
+                pre_image = np.expand_dims(pre_image, axis=0)
+                base_image = np.expand_dims(base_image, axis=0)
+                next_time = np.expand_dims(next_time, axis=0)
+
                 with torch.no_grad():
-                    X = torch.from_numpy(np.array([base_image, next_time])).float()
+                    X = torch.from_numpy(
+                        np.array([pre_image, base_image, next_time])
+                    ).float()
                     X = X.unsqueeze(0)
                     X = X.to(device)
                     pred = model(X)
 
-                    converted_pred = pred[0].cpu().numpy()
+                    converted_pred = pred[0][0].cpu().numpy()
                     converted_pred = np.vstack(
                         (
                             converted_pred,
@@ -2210,12 +2251,17 @@ while keep_training:
                         converted_pred.max() - converted_pred.min()
                     )
 
-                    base_image = np.array((X[0, 0].cpu().numpy(),) * 3)
+                    base_image = X[0, 0].cpu().numpy()
+                    base_image = np.repeat(base_image, 3, axis=0)
                     base_image = np.transpose(base_image, (1, 2, 0))
-                    next_time = np.array((X[0, 1].cpu().numpy(),) * 3)
+                    next_time = X[0, 1].cpu().numpy()
+                    next_time = np.repeat(next_time, 3, axis=0)
                     next_time = np.transpose(next_time, (1, 2, 0))
+                    next2_time = X[0, 2].cpu().numpy()
+                    next2_time = np.repeat(next2_time, 3, axis=0)
+                    next2_time = np.transpose(next2_time, (1, 2, 0))
                     combined = np.hstack(
-                        (base_image, next_time, converted_pred * 256)
+                        (base_image, next_time, next2_time, converted_pred * 256)
                     ).astype(np.uint8)
 
                     wandb.log(
@@ -2225,8 +2271,6 @@ while keep_training:
                             ),
                         }
                     )
-
-    scheduler.step(average_validation_loss)
 
     print(f"Epoch {epoch+1}/{EPOCHS}")
     print(f"Train Loss: {average_trianing_loss:.4f}")

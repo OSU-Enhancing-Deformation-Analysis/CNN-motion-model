@@ -1,7 +1,7 @@
 # %% [markdown]
 # ### Imports
 
-#  This model adds some warping thing to epe loss model
+#  This is the same warping model but with the stationary AB tiles
 #
 
 # %%
@@ -48,8 +48,8 @@ print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 # %%
 
 # SPECIFICALLY THE AB TILES
-TILES_DIR = "../../tiles/ab/"
-# TILES_DIR = "./tiles"
+# TILES_DIR = "../../tiles/ab/"
+TILES_DIR = "./tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
 # MAX_TILES = 100  # For just quick tests
@@ -57,8 +57,6 @@ MAX_TILES = 5000  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
 TILE_SIZE = 256
-TILES_PER_CHUNK = 6
-USEFUL_TILES_PER_CHUNK = TILES_PER_CHUNK - 1
 
 # Dataset parameters
 VARIATIONS_PER_IMAGE = 1
