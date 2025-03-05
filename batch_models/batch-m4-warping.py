@@ -1233,17 +1233,59 @@ class CustomDataset(Dataset):
             final_field = computed_field
 
         image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        print(
+            "Image shape",
+            image.shape,
+            "dtype",
+            image.dtype,
+            "min",
+            image.min(),
+            "max",
+            image.max(),
+        )
 
         dU, dV = final_field
+        print("dU shape", dU.shape, "dtype", dU.dtype, "min", dU.min(), "max", dU.max())
+        print("dV shape", dV.shape, "dtype", dV.dtype, "min", dV.min(), "max", dV.max())
 
         new_x = self.pos_x - dU * 10
         new_y = self.pos_y - dV * 10
+        print(
+            "New X shape",
+            new_x.shape,
+            "dtype",
+            new_x.dtype,
+            "min",
+            new_x.min(),
+            "max",
+            new_x.max(),
+        )
+        print(
+            "New Y shape",
+            new_y.shape,
+            "dtype",
+            new_y.dtype,
+            "min",
+            new_y.min(),
+            "max",
+            new_y.max(),
+        )
 
         warped_image = map_coordinates(
             image,
             [new_y, new_x],
             order=0,
             mode="wrap",
+        )
+        print(
+            "Warped Image shape",
+            warped_image.shape,
+            "dtype",
+            warped_image.dtype,
+            "min",
+            warped_image.min(),
+            "max",
+            warped_image.max(),
         )
 
         return np.array([image, warped_image]).astype(np.float32), np.array(

@@ -1,7 +1,7 @@
 # %% [markdown]
 # ### Imports
 
-#  This is the same warping model but with the stationary AB tiles
+#  This model adds some warping thing to epe loss model
 #
 
 # %%
@@ -17,7 +17,6 @@ import numpy as np
 import numpy.typing as npt
 import matplotlib.pyplot as plt
 import perlin_numpy as pnp
-from collections import defaultdict
 import math
 from PIL import Image
 from skimage.util import img_as_float
@@ -47,13 +46,12 @@ print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
 
 # %%
 
-# SPECIFICALLY THE AB TILES
-# TILES_DIR = "../../tiles/ab/"
-TILES_DIR = "./tiles"
+# TILES_DIR = "./tiles"
+TILES_DIR = "../../tiles"
 # Load all images (both stem and graphite)
 TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
-# MAX_TILES = 100  # For just quick tests
-MAX_TILES = 5000  # For running all the images
+MAX_TILES = 50  # For just quick tests
+# MAX_TILES = 17556  # For running all the images
 NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
 
 TILE_SIZE = 256
@@ -70,7 +68,7 @@ EPOCHS = None
 MAX_TIME = 20 * 60 * 60  # In seconds | Use this or EPOCHS
 
 # ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
-BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 4)
+BATCH_SIZE = int((GPU_MEMORY - 1.5) / 0.13 / 6)
 # BATCH_SIZE = 240  # Fills 32 GB VRAM
 IMG_SIZE = TILE_SIZE
 LEARNING_RATE = 0.0001
@@ -83,31 +81,11 @@ else:
     MODEL_NAME = sys.argv[1]
 MODEL_FILE = f"{MODEL_NAME}.pth"
 
+# if not os.path.exists(MODEL_NAME):
+#     os.makedirs(MODEL_NAME)
+
 # %% [markdown]
 # # Dataset
-# print(TILE_IMAGE_PATHS)
-GROUPED_TILE_PATHS = defaultdict(list)
-
-for path in TILE_IMAGE_PATHS:
-    # Get the folder structure above the file
-    relative_path = os.path.relpath(path, TILES_DIR)
-    folders = os.path.dirname(relative_path).split(os.sep)
-
-    # Concatenate folder names to create a key
-    group_key = "_".join(folders) if folders else "root"
-
-    # Append file to the appropriate group
-    GROUPED_TILE_PATHS[group_key].append(path)
-
-# Convert defaultdict to a regular dictionary
-GROUPED_TILE_PATHS = dict(GROUPED_TILE_PATHS)
-GROUPED_TILE_FOLDERS = list(GROUPED_TILE_PATHS.keys())
-GROUPED_TILE_INDEXES = []
-tmp_x = 0
-
-for x in GROUPED_TILE_PATHS.values():
-    tmp_x += len(x)
-    GROUPED_TILE_INDEXES.append(tmp_x)
 
 
 # %%
@@ -1113,35 +1091,11 @@ class CustomDataset(Dataset):
         # [1  , ..., n  , n+1, ..., n+n, vn+1,..., vn+n,...]
         # Where n is the number of images
         # And v is the variation number
-        """
-        Indexes work like this:
-        Data: [1, 2, 3, 4] [1, 2, 3, 4] [1, 2, 3, 4] [1, 2, 3, 4]
-        Index: 0---  2---   3---  5---   6---  8---   9---  11--
-                  1---         4---         7---         10--
-        """
 
         global current_epoch
 
-        image_index = index % NUM_TILES
-        image_chunk = None
-        image_index_in_chunk = 0
-        for i, x in enumerate(GROUPED_TILE_INDEXES):
-            if image_index < x:
-                image_chunk = GROUPED_TILE_FOLDERS[i]
-                if i == 0:
-                    image_index_in_chunk = image_index
-                else:
-                    image_index_in_chunk = image_index - GROUPED_TILE_INDEXES[i - 1]
-                break
-
-        if image_chunk is None:
-            image_chunk = GROUPED_TILE_FOLDERS[0]
-            image_index_in_chunk = 0
-
-        image1_path = GROUPED_TILE_PATHS[image_chunk][image_index_in_chunk]
-        image2_path = GROUPED_TILE_PATHS[image_chunk][image_index_in_chunk - 1]
-
         # Get the image index
+        path_index = index % NUM_TILES
         if self.validate:
             index += 10000000
             random.seed(index)
@@ -1169,6 +1123,7 @@ class CustomDataset(Dataset):
             # Morph the image
             self.composer.clear()
             shape_morph_composer = self.composer
+
             num_fields = random.randint(1, 2)
             for _ in range(num_fields):
                 field_type = random.choice(self.available_fields)
@@ -1207,57 +1162,113 @@ class CustomDataset(Dataset):
         else:
             final_field = computed_field
 
-        image1 = np.array(Image.open(TILE_IMAGE_PATHS[image1_path], mode="r"))
-        image2 = np.array(Image.open(TILE_IMAGE_PATHS[image2_path], mode="r"))
+        image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        # print(
+        #     "Image shape",
+        #     image.shape,
+        #     "dtype",
+        #     image.dtype,
+        #     "min",
+        #     image.min(),
+        #     "max",
+        #     image.max(),
+        # )
+        image = img_as_float(image).astype(np.float32)
+        #! Normalize the values
+        image = image / image.max()
+        # print(
+        #     "Image Float shape",
+        #     image.shape,
+        #     "dtype",
+        #     image.dtype,
+        #     "min",
+        #     image.min(),
+        #     "max",
+        #     image.max(),
+        # )
 
+        #! Move the scale to the visual not the values.
         dU, dV = final_field
+        # print("dU shape", dU.shape, "dtype", dU.dtype, "min", dU.min(), "max", dU.max())
+        # print("dV shape", dV.shape, "dtype", dV.dtype, "min", dV.min(), "max", dV.max())
 
-        new_x = self.pos_x - dU
-        new_y = self.pos_y - dV
+        #! Scale the values by 10 instead of 2
+        new_x = self.pos_x - dU * 10.0
+        new_y = self.pos_y - dV * 10.0
+        # print(
+        #     "New X shape",
+        #     new_x.shape,
+        #     "dtype",
+        #     new_x.dtype,
+        #     "min",
+        #     new_x.min(),
+        #     "max",
+        #     new_x.max(),
+        # )
+        # print(
+        #     "New Y shape",
+        #     new_y.shape,
+        #     "dtype",
+        #     new_y.dtype,
+        #     "min",
+        #     new_y.min(),
+        #     "max",
+        #     new_y.max(),
+        # )
 
-        denoised_image, extracted_noise = extract_wavelet_noise(img_as_float(image2))
+        denoised_image, extracted_noise = extract_wavelet_noise(image)
+        # print(
+        #     "Denoised Image shape",
+        #     denoised_image.shape,
+        #     "dtype",
+        #     denoised_image.dtype,
+        #     "min",
+        #     denoised_image.min(),
+        #     "max",
+        #     denoised_image.max(),
+        # )
+        # print(
+        #     "Extracted Noise shape",
+        #     extracted_noise.shape,
+        #     "dtype",
+        #     extracted_noise.dtype,
+        #     "min",
+        #     extracted_noise.min(),
+        #     "max",
+        #     extracted_noise.max(),
+        # )
         warped_image = map_coordinates(
             denoised_image,
             [new_y, new_x],
             order=0,
             mode="wrap",
         )
+        # print(
+        #     "Warped Image shape",
+        #     warped_image.shape,
+        #     "dtype",
+        #     warped_image.dtype,
+        #     "min",
+        #     warped_image.min(),
+        #     "max",
+        #     warped_image.max(),
+        # )
         applied_denoised_image = np.clip(warped_image + extracted_noise, 0, 1)
+        # print(
+        #     "Applied Denoised Image shape",
+        #     applied_denoised_image.shape,
+        #     "dtype",
+        #     applied_denoised_image.dtype,
+        #     "min",
+        #     applied_denoised_image.min(),
+        #     "max",
+        #     applied_denoised_image.max(),
+        # )
 
-        print(
-            f"Image1 shape: {image1.shape}, dtype: {image1.dtype}, min: {image1.min()}, max: {image1.max()}"
-        )
-        print(
-            f"Image2 shape: {image2.shape}, dtype: {image2.dtype}, min: {image2.min()}, max: {image2.max()}"
-        )
-        print(
-            f"Denoised image shape: {denoised_image.shape}, dtype: {denoised_image.dtype}, min: {denoised_image.min()}, max: {denoised_image.max()}"
-        )
-        print(
-            f"Applied denoised image shape: {applied_denoised_image.shape}, dtype: {applied_denoised_image.dtype}, min: {applied_denoised_image.min()}, max: {applied_denoised_image.max()}"
-        )
-        print(
-            f"Extracted noise shape: {extracted_noise.shape}, dtype: {extracted_noise.dtype}, min: {extracted_noise.min()}, max: {extracted_noise.max()}"
-        )
-        print(
-            f"Warped image shape: {warped_image.shape}, dtype: {warped_image.dtype}, min: {warped_image.min()}, max: {warped_image.max()}"
-        )
-        print(
-            f"dU shape: {dU.shape}, dtype: {dU.dtype}, min: {dU.min()}, max: {dU.max()}"
-        )
-        print(
-            f"dV shape: {dV.shape}, dtype: {dV.dtype}, min: {dV.min()}, max: {dV.max()}"
-        )
-
-        return np.array([image1, applied_denoised_image]).astype(np.float32), np.array(
+        return np.array([image, applied_denoised_image]).astype(np.float32), np.array(
             [dU, dV]
         ).astype(np.float32)
 
-
-# %%
-test_data = CustomDataset(1)
-test_entry = test_data[0]
-print(test_entry)
 
 # %%
 sequence_arrays = {}
@@ -1311,11 +1322,14 @@ training_dataloader = DataLoader(
     training_dataset,
     batch_size=BATCH_SIZE,
     shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=True,
+    # num_workers=NUM_WORKERS,
+    # pin_memory=True,
 )
 validation_dataloader = DataLoader(
-    validation_dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=True
+    validation_dataset,
+    batch_size=BATCH_SIZE,
+    # num_workers=NUM_WORKERS,
+    # pin_memory=True
 )
 
 for x, y in training_dataloader:
@@ -1577,8 +1591,9 @@ class MotionVectorRegressionNetworkWithWarping(
 model = MotionVectorRegressionNetworkWithWarping(
     input_images=2, max_displacement=20
 ).to(device)
-if os.path.exists(MODEL_FILE):
-    model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
+# if os.path.exists(MODEL_FILE):
+#     model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
+model.load_state_dict(torch.load("../model_files/b4-warp-test2.pth", weights_only=True))
 print(model)
 
 
@@ -1735,7 +1750,27 @@ while keep_training:
         with torch.no_grad():
             torch.save(model.state_dict(), "snapshot_save.pt")
 
+            print(
+                "Sample shapes",
+                samples_images[0].shape,
+                "dtype",
+                samples_images[0].dtype,
+                "min",
+                samples_images[0].min(),
+                "max",
+                samples_images[0].max(),
+            )
             sample_predictions = model(samples_images.to(device))
+            print(
+                "Sample shapes",
+                sample_predictions[0].shape,
+                "dtype",
+                sample_predictions[0].dtype,
+                "min",
+                sample_predictions[0].min(),
+                "max",
+                sample_predictions[0].max(),
+            )
 
             for i, images in enumerate(samples_images):
                 vectors = samples_vectors[i]
@@ -1748,9 +1783,9 @@ while keep_training:
                     )
                 )
                 converted_y = np.transpose(converted_y, (1, 2, 0))
-                converted_y = (converted_y - converted_y.min()) / (
-                    converted_y.max() - converted_y.min()
-                )
+                # Y Values distrobution around 0 sigma = 2
+                converted_y = (converted_y + 2) / (4)
+                converted_y = np.clip(converted_y, 0, 1)
 
                 converted_pred = sample_predictions[i].cpu().numpy()
                 converted_pred = np.vstack(
@@ -1760,17 +1795,29 @@ while keep_training:
                     )
                 )
                 converted_pred = np.transpose(converted_pred, (1, 2, 0))
-                converted_pred = (converted_pred - converted_pred.min()) / (
-                    converted_pred.max() - converted_pred.min()
-                )
+                converted_pred = (converted_pred + 2) / (4)
+                converted_pred = np.clip(converted_pred, 0, 1)
 
                 base_image = np.array((images[0].cpu().numpy(),) * 3)
                 base_image = np.transpose(base_image, (1, 2, 0))
                 morph_image = np.array((images[1].cpu().numpy(),) * 3)
                 morph_image = np.transpose(morph_image, (1, 2, 0))
-                combined = np.hstack(
-                    (base_image, morph_image, converted_y * 256, converted_pred * 256)
-                ).astype(np.uint8)
+                combined = (
+                    np.hstack((base_image, morph_image, converted_y, converted_pred))
+                    * 256
+                )
+                combined = combined.astype(np.uint8)
+
+                print(
+                    "Combinedsamp shape:",
+                    combined.shape,
+                    "dtype:",
+                    combined.dtype,
+                    "min:",
+                    combined.min(),
+                    "max:",
+                    combined.max(),
+                )
 
                 wandb.log(
                     {
@@ -1780,19 +1827,34 @@ while keep_training:
                     }
                 )
 
-            tiles = ["a21_tile_0", "a53_tile_3", "b22_tile_1"]
-            for tile in tiles:
-                image1_path = GROUPED_TILE_PATHS[tile][10]
-                image2_path = GROUPED_TILE_PATHS[tile][11]
+            sequence_name = "g69"  # g69 71-72 tile 9-11
+            tiles = [9, 10, 11]
+            frame_start = 71 - 35
 
-                image1 = np.array(Image.open(image1_path))
-                image2 = np.array(Image.open(image2_path))
+            for tile in tiles:
+                tile_sequence_paths = sequence_arrays[sequence_name][tile]
+                base_image_path = tile_sequence_paths[frame_start]
+                next_time_path = tile_sequence_paths[frame_start + 1]
+
+                base_image = img_as_float(np.array(Image.open(base_image_path)))
+                next_time = img_as_float(np.array(Image.open(next_time_path)))
+
+                print(
+                    f"Base image shape: {base_image.shape}, dtype: {base_image.dtype}, min: {base_image.min()}, max: {base_image.max()}"
+                )
+                print(
+                    f"Next time shape: {next_time.shape}, dtype: {next_time.dtype}, min: {next_time.min()}, max: {next_time.max()}"
+                )
 
                 with torch.no_grad():
-                    X = torch.from_numpy(np.array([image1, image2])).float()
+                    X = torch.from_numpy(np.array([base_image, next_time])).float()
                     X = X.unsqueeze(0)
                     X = X.to(device)
                     pred = model(X)
+
+                    # print(
+                    #     f"Prediction shape: {pred[0].shape}, dtype: {pred[0].dtype}, min: {pred[0].min()}, max: {pred[0].max()}"
+                    # )
 
                     converted_pred = pred[0].cpu().numpy()
                     converted_pred = np.vstack(
@@ -1808,21 +1870,30 @@ while keep_training:
                         )
                     )
                     converted_pred = np.transpose(converted_pred, (1, 2, 0))
-                    converted_pred = (converted_pred - converted_pred.min()) / (
-                        converted_pred.max() - converted_pred.min()
-                    )
+                    converted_pred = (converted_pred + 2) / (4)
+                    converted_pred = np.clip(converted_pred, 0, 1)
 
                     base_image = np.array((X[0, 0].cpu().numpy(),) * 3)
                     base_image = np.transpose(base_image, (1, 2, 0))
                     next_time = np.array((X[0, 1].cpu().numpy(),) * 3)
                     next_time = np.transpose(next_time, (1, 2, 0))
-                    combined = np.hstack(
-                        (base_image, next_time, converted_pred * 256)
-                    ).astype(np.uint8)
+                    combined = np.hstack((base_image, next_time, converted_pred)) * 256
+                    combined = combined.astype(np.uint8)
+
+                    print(
+                        "Combinedtest shape:",
+                        combined.shape,
+                        "dtype:",
+                        combined.dtype,
+                        "min:",
+                        combined.min(),
+                        "max:",
+                        combined.max(),
+                    )
 
                     wandb.log(
                         {
-                            f"tests/sample_{tile}": wandb.Image(
+                            f"tests/sample_{sequence_name}_{tile}_{frame_start}": wandb.Image(
                                 combined, caption=f"Epoch: {epoch}"
                             ),
                         }
