@@ -1,0 +1,2274 @@
+# %% [markdown]
+# ### Imports
+
+#  This model adds some warping thing to epe loss model
+#
+
+# %%
+import os
+import glob
+import re
+import random
+import sys
+import time
+from typing import Callable, List, Tuple, Dict, TypeAlias
+
+import numpy as np
+import numpy.typing as npt
+import matplotlib.pyplot as plt
+import perlin_numpy as pnp
+import math
+from PIL import Image
+from skimage.util import img_as_float
+from skimage.restoration import denoise_wavelet
+from yacs.config import CfgNode as CN
+import wandb
+
+import torch
+from torch import nn, Tensor
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
+import timm
+from torch import nn, einsum
+from einops import rearrange
+
+# %% [markdown]
+# ### Constants
+
+# %%
+device = (
+    torch.accelerator.current_accelerator().type
+    if torch.accelerator.is_available()
+    else "cpu"
+)
+print(f"Using {device} device")
+
+GPU_MEMORY = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # in GB
+GPU = torch.cuda.get_device_name(0)
+print(f"Using {GPU} GPU with {GPU_MEMORY} GB of memory")
+
+# %%
+
+#! Change
+TILES_DIR = "./tiles"
+# TILES_DIR = "../../tiles"
+# Load all images (both stem and graphite)
+TILE_IMAGE_PATHS = glob.glob(os.path.join(TILES_DIR, "**/*.png"), recursive=True)
+# MAX_TILES = 40  # For running tests
+MAX_TILES = 17556  # For running all the images
+NUM_TILES = min(MAX_TILES, len(TILE_IMAGE_PATHS))
+
+TILE_SIZE = 256
+
+# Dataset parameters
+VARIATIONS_PER_IMAGE = 1
+
+# Training parameters
+# EPOCHS = 10 # Use this or MAX_TIME
+# MAX_TIME = None
+
+EPOCHS = None
+# MAX_TIME = 15  # In seconds | Use this or EPOCHS
+#! Change
+MAX_TIME = 100 * 60 * 60  # In seconds | Use this or EPOCHS
+
+# ( GB - 0.5 (buffer)) / 0.13 = BATCH_SIZE
+BATCH_SIZE = int((GPU_MEMORY - 1.0) / 2.0)
+# BATCH_SIZE = 4 # 8.7 GB
+IMG_SIZE = TILE_SIZE
+LEARNING_RATE = 25e-5
+SAVE_FREQUENCY = 1  # Writes a checkpoint file
+
+# Model name for saving files and in wandb
+if len(sys.argv) < 2:
+    MODEL_NAME = "b4-unknown-test"
+else:
+    MODEL_NAME = sys.argv[1]
+MODEL_FILE = f"{MODEL_NAME}.pth"
+
+# if not os.path.exists(MODEL_NAME):
+#     os.makedirs(MODEL_NAME)
+
+# %% [markdown]
+# # Dataset
+
+
+# %%
+from dataclasses import dataclass
+from scipy.spatial import (
+    ConvexHull,
+)  # Correct import for ConvexHull
+from scipy.ndimage import map_coordinates, gaussian_filter
+from functools import wraps
+
+farray: TypeAlias = npt.NDArray[np.float32]
+
+# Global registry for vector fields
+VECTOR_FIELDS: Dict[
+    str,
+    Callable[
+        [farray, farray],
+        Tuple[farray, farray],
+    ],
+] = {}
+
+
+def vector_field():
+    def decorator(func: Callable):
+        field_name = func.__name__
+        VECTOR_FIELDS[field_name] = func
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+@vector_field()
+def translation_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    return np.ones_like(X), np.zeros_like(Y)
+
+
+@vector_field()
+def rotation_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    return -Y, X
+
+
+@vector_field()
+def shear_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    return np.ones_like(X), X
+
+
+@vector_field()
+def shear_field2(X, Y):
+    return Y, np.zeros_like(Y)
+
+
+@vector_field()
+def scale_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    return X, Y
+
+
+@vector_field()
+def gradient_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    return X**2, Y**2
+
+
+@vector_field()
+def gradient_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
+    field = X**2 + Y**2
+    return np.gradient(field, axis=0) * 10, np.gradient(field, axis=1) * 10
+
+
+@vector_field()
+def harmonic_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    return np.sin(X), np.cos(Y)
+
+
+@vector_field()
+def harmonic_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
+    innerX = 0.75 * np.pi * X
+    innerY = 0.75 * np.pi * Y
+    sinX: farray = np.sin(innerX)
+    cosX: farray = np.cos(innerX)
+    sinY: farray = np.sin(innerY)
+    cosY: farray = np.cos(innerY)
+
+    return (sinX * cosY), (-cosX * sinY)
+
+
+@vector_field()
+def vortex_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    r = np.sqrt(X**2 + Y**2)
+    return -Y / (r**2 + 0.1), X / (r**2 + 0.1)
+
+
+@vector_field()
+def perlin_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    noise_x = pnp.generate_perlin_noise_2d((X.shape[0], X.shape[1]), res=(1, 1))
+    noise_y = pnp.generate_perlin_noise_2d((X.shape[0], X.shape[1]), res=(1, 1))
+    return noise_x, noise_y
+
+
+@vector_field()
+def swirl_field(X: farray, Y: farray) -> Tuple[farray, farray]:
+    epsilon = 0.1  # Small smoothing factor
+    radius = np.sqrt(X**2 + Y**2 + epsilon**2)  # Smoothed radius
+    angle = np.arctan2(Y, X)
+
+    magnitude = np.tanh(radius)  # Scales velocity smoothly to 0 at origin
+    dx: farray = np.cos(angle + radius)
+    dy: farray = np.sin(angle + radius)
+    dx *= magnitude
+    dy *= magnitude
+
+    return dx, dy
+
+
+@vector_field()
+def vortex_field2(X: farray, Y: farray) -> Tuple[farray, farray]:
+    radius = np.sqrt(X**2 + Y**2)
+    angle = np.arctan2(Y, X)
+    dx = -Y / (radius + 0.1)
+    dy = X / (radius + 0.1)
+    return dx, dy
+
+
+@dataclass
+class VectorField:
+    name: str
+    field_func: Callable
+    amplitude: float = 1.0
+    center: Tuple[float, float] = (0, 0)
+    scale: float = 1.0
+    rotation: float = 0.0
+
+    def randomize(self) -> None:
+        self.center = (random.random() * 2 - 1, random.random() * 2 - 1)
+        self.scale = random.uniform(0.8, 2.0)
+        self.rotation = random.random() * 2 * np.pi
+        self.amplitude = random.uniform(0.25, 0.75)
+
+    def apply(self, X: farray, Y: farray) -> Tuple[farray, farray]:
+        X_scaled = X * self.scale
+        Y_scaled = Y * self.scale
+
+        X_centered = X_scaled - self.center[0]
+        Y_centered = Y_scaled - self.center[1]
+
+        cos_theta = np.cos(self.rotation)
+        sin_theta = np.sin(self.rotation)
+
+        X_rot_pos = X_centered * cos_theta - Y_centered * sin_theta
+        Y_rot_pos = X_centered * sin_theta + Y_centered * cos_theta
+
+        dx, dy = self.field_func(X_rot_pos, Y_rot_pos)
+
+        X_rot = dx * cos_theta - dy * sin_theta
+        Y_rot = dx * sin_theta + dy * cos_theta
+
+        return X_rot * self.amplitude, Y_rot * self.amplitude
+
+
+class VectorFieldComposer:
+    def __init__(self):
+        self.fields: List[VectorField] = []
+
+        self.grid_X, self.grid_Y = np.meshgrid(
+            np.linspace(-1, 1, TILE_SIZE), np.linspace(-1, 1, TILE_SIZE)
+        )
+        self.pos_x, self.pos_y = np.meshgrid(np.arange(TILE_SIZE), np.arange(TILE_SIZE))
+
+    def add_field(self, field_type: str, randomize: bool = True, **kwargs) -> None:
+        if field_type not in VECTOR_FIELDS:
+            raise ValueError(f"Unknown field type: {field_type}")
+
+        field = VectorField(
+            name=field_type, field_func=VECTOR_FIELDS[field_type], **kwargs
+        )
+        if randomize:
+            field.randomize()
+        self.fields.append(field)
+
+    def clear(self):
+        self.fields.clear()
+
+    def pop_field(self) -> None:
+        self.fields.pop()
+
+    def last(self) -> VectorField:
+        return self.fields[-1]
+
+    def compute_combined_field(self) -> Tuple[farray, farray]:
+        total_dx = np.zeros_like(self.grid_X)
+        total_dy = np.zeros_like(self.grid_Y)
+
+        for field in self.fields:
+            dx, dy = field.apply(self.grid_X, self.grid_Y)
+            total_dx += dx
+            total_dy += dy
+
+        return total_dx, total_dy
+
+    def apply_to_image(
+        self, image: npt.NDArray[np.uint8]
+    ) -> Tuple[npt.NDArray[np.uint8], npt.NDArray[np.float32]]:
+        dU, dV = self.compute_combined_field()
+
+        new_x = self.pos_x - dU
+        new_y = self.pos_y - dV
+
+        warped_image = map_coordinates(
+            image,
+            [new_y, new_x],
+            order=0,
+            mode="wrap",
+        )
+
+        return warped_image.astype(np.uint8), np.array([dU, dV])
+
+
+# %%
+
+
+def create_square_shape(size, position=None, scale=None, rotation=None):
+    """Creates a square shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    square_size = int(size // 4 * scale)  # Scale the size
+    square_start_x = size // 2 - square_size // 2 + position[0]  # Position the square
+    square_start_y = size // 2 - square_size // 2 + position[1]
+
+    # Clip to image boundaries
+    square_start_x = max(0, min(square_start_x, size))
+    square_start_y = max(0, min(square_start_y, size))
+    effective_size_x = min(square_size, size - square_start_x)
+    effective_size_y = min(square_size, size - square_start_y)
+
+    if effective_size_x <= 0 or effective_size_y <= 0:
+        return np.zeros((size, size), dtype=np.uint8)  # Return empty if out of bounds
+
+    square_array = np.zeros((size, size), dtype=np.uint8)
+    square_array[
+        square_start_y : square_start_y + effective_size_y,
+        square_start_x : square_start_x + effective_size_x,
+    ] = 200
+
+    # Rotation (simple image rotation - can be improved for shape rotation only if needed)
+    if rotation != 0:
+        from scipy.ndimage import rotate
+
+        square_array = rotate(
+            square_array, np.degrees(rotation), order=0, reshape=False
+        )  # order=0 for nearest neighbor
+
+    return square_array
+
+
+def create_circle_shape(size, position=None, scale=None, rotation=None):
+    """Creates a circle shape with randomized position and scale."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = 0  # Circle rotation not directly applicable
+
+    center_x_base, center_y_base = (
+        size * 3 // 4,
+        size // 4,
+    )  # Base center, will be offset
+    center_x = int(center_x_base + position[0])
+    center_y = int(center_y_base + position[1])
+    radius = int(size // 8 * scale)  # Scale radius
+
+    circle_array = np.zeros((size, size), dtype=np.uint8)
+    for y in range(size):
+        for x in range(size):
+            if (x - center_x) ** 2 + (y - center_y) ** 2 <= radius**2:
+                circle_array[y, x] = 150
+    return circle_array
+
+
+def create_blob_shape(size, position=None, scale=None, rotation=None):
+    """Creates a blob shape with randomized position and scale."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.5, 1.5)
+    if rotation is None:
+        rotation = 0  # Blob rotation not directly applicable
+
+    center_x_base, center_y_base = size // 2, size // 2  # Base center, will be offset
+    center_x = int(center_x_base + position[0])
+    center_y = int(center_y_base + position[1])
+    scaled_size = int(size * scale)  # Scale the effective size for blob radius
+
+    blob_array = np.zeros((size, size), dtype=np.uint8)
+    for y in range(size):
+        for x in range(size):
+            distance_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+            value = int(
+                255 * (1 - distance_from_center / (scaled_size / 2))
+            )  # Scaled size for radius
+            value = max(0, min(255, value))
+            blob_array[y, x] = value
+    return blob_array
+
+
+def create_swirl_shape(size, position=None, scale=None, rotation=None):
+    """Creates a swirl pattern with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(4.0, 7.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    swirl_array = np.zeros((size, size), dtype=np.uint8)
+    center_x_base, center_y_base = size // 2, size // 2
+    center_x = center_x_base + position[0]
+    center_y = center_y_base + position[1]
+
+    for y in range(size):
+        for x in range(size):
+            x_rel = (x - center_x) / scale
+            y_rel = (y - center_y) / scale
+
+            if rotation != 0:
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = x_rel * cos_theta - y_rel * sin_theta
+                y_rot = x_rel * sin_theta + y_rel * cos_theta
+                x_rel, y_rel = x_rot, y_rot
+
+            angle = np.arctan2(y_rel, x_rel)
+            radius = np.sqrt(x_rel**2 + y_rel**2 + 0.1)
+
+            value = int(128 + 127 * np.sin((radius / 5) + angle * 5))
+            swirl_array[y, x] = value
+
+    return swirl_array
+
+
+def create_gradient_shape(size, position=None, scale=None, rotation=None):
+    """Creates a gradient shape with randomized position, scale, and rotation (mostly scale/position effect)."""
+    if position is None:
+        position_x = random.randint(
+            -size // 2, size // 2
+        )  # Wider position range for gradient
+        position_y = random.randint(-size // 2, size // 2)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.5, 2.0)  # Wider scale range for gradient
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)  # Rotation for gradient direction
+
+    gradient_array = np.zeros((size, size), dtype=np.uint8)
+    for y in range(size):
+        for x in range(size):
+            x_rel = (
+                x + position[0]
+            ) / scale  # Position and scale affect gradient position and spread
+            y_rel = (y + position[1]) / scale
+
+            if rotation != 0:  # Rotate gradient direction
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = x_rel * cos_theta - y_rel * sin_theta
+                x_rel = x_rot  # Only horizontal gradient, so only rotate x coordinate
+
+            value = int(
+                255 * ((x_rel + size) % size) / size
+            )  # Modulo for repeating gradient if scaled up
+            gradient_array[y, x] = value
+    return gradient_array
+
+
+def create_checkers_shape(
+    size, checker_size_param=None, position=None, scale=None, rotation=None
+):
+    """Creates a checkerboard pattern with randomized checker size, position, scale, and rotation."""
+    if checker_size_param is None:
+        checker_size_param = random.randint(4, 16)  # Random checker size
+    if position is None:
+        position_x = random.randint(
+            -size // 2, size // 2
+        )  # Wider position range for checkers
+        position_y = random.randint(-size // 2, size // 2)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(2.0, 6.0)  # Wider scale range for checkers
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)  # Rotation for checker orientation
+
+    checkers_array = np.zeros((size, size), dtype=np.uint8)
+    scaled_checker_size = int(checker_size_param * scale)  # Scale checker size
+
+    for y in range(size):
+        for x in range(size):
+            x_rel = (x + position[0]) / scale  # Position and scale affect checker grid
+            y_rel = (y + position[1]) / scale
+
+            if rotation != 0:  # Rotate checker grid
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = x_rel * cos_theta - y_rel * sin_theta
+                y_rot = x_rel * sin_theta + y_rel * cos_theta
+                x_rel, y_rel = x_rot, y_rot
+
+            checker_x = int(x_rel) // scaled_checker_size
+            checker_y = int(y_rel) // scaled_checker_size
+
+            if ((checker_x) + (checker_y)) % 2 == 0:
+                checkers_array[y, x] = 200  # Light gray
+            else:
+                checkers_array[y, x] = 50  # Dark gray
+    return checkers_array
+
+
+def create_rectangle_shape(size, position=None, scale=None, rotation=None):
+    """Creates a rectangle shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    rect_width = int(size // 2 * scale)  # Scale width
+    rect_height = int(size // 3 * scale)  # Scale height
+    start_x = size // 2 - rect_width // 2 + position[0]  # Position rectangle
+    start_y = size // 2 - rect_height // 2 + position[1]
+
+    # Clip to image boundaries
+    start_x = max(0, min(start_x, size))
+    start_y = max(0, min(start_y, size))
+    effective_width = min(rect_width, size - start_x)
+    effective_height = min(rect_height, size - start_y)
+
+    if effective_width <= 0 or effective_height <= 0:
+        return np.zeros((size, size), dtype=np.uint8)  # Return empty if out of bounds
+
+    rect_array = np.zeros((size, size), dtype=np.uint8)
+    rect_array[
+        start_y : start_y + effective_height, start_x : start_x + effective_width
+    ] = 220  # Slightly lighter gray
+
+    # Rotation (simple image rotation)
+    if rotation != 0:
+        from scipy.ndimage import rotate
+
+        rect_array = rotate(rect_array, np.degrees(rotation), order=0, reshape=False)
+
+    return rect_array
+
+
+def create_triangle_shape(size, position=None, scale=None, rotation=None):
+    """Creates a triangle shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.5, 1.5)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    triangle_array = np.zeros((size, size), dtype=np.uint8)
+    for y in range(size):
+        for x in range(size):
+            x_rel = (
+                x - size // 2 - position[0]
+            ) / scale  # Scale and position relative to center
+            y_rel = (y - size // 2 - position[1]) / scale
+
+            if rotation != 0:  # Rotate coordinates
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = x_rel * cos_theta - y_rel * sin_theta
+                y_rot = x_rel * sin_theta + y_rel * cos_theta
+                x_rel, y_rel = x_rot, y_rot
+
+            if (
+                y_rel >= x_rel
+            ):  # Original condition relative to *transformed* coordinates
+                triangle_array[y, x] = 180
+    return triangle_array
+
+
+def create_ellipse_shape(size, position=None, scale=None, rotation=None):
+    """Creates an ellipse shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    center_x_base, center_y_base = size // 2, size // 2  # Base center for ellipse
+    center_x = int(center_x_base + position[0])
+    center_y = int(center_y_base + position[1])
+    major_axis = size // 3 * scale  # Scale axes
+    minor_axis = size // 4 * scale
+
+    ellipse_array = np.zeros((size, size), dtype=np.uint8)
+    for y in range(size):
+        for x in range(size):
+            x_rel = x - center_x
+            y_rel = y - center_y
+
+            if rotation != 0:  # Rotate coordinates
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = x_rel * cos_theta - y_rel * sin_theta
+                y_rot = x_rel * sin_theta + y_rel * cos_theta
+                x_rel, y_rel = x_rot, y_rot
+
+            if ((x_rel) ** 2 / major_axis**2) + ((y_rel) ** 2 / minor_axis**2) <= 1:
+                ellipse_array[y, x] = 120
+    return ellipse_array
+
+
+def create_pentagon_shape(size, position=None, scale=None, rotation=None):
+    """Creates a pentagon shape with randomized position, scale, and rotation."""
+    return create_polygon_shape(size, 5, position, scale, rotation)
+
+
+def create_hexagon_shape(size, position=None, scale=None, rotation=None):
+    """Creates a hexagon shape with randomized position, scale, and rotation."""
+    return create_polygon_shape(size, 6, position, scale, rotation)
+
+
+def create_octagon_shape(size, position=None, scale=None, rotation=None):
+    """Creates an octagon shape with randomized position, scale, and rotation."""
+    return create_polygon_shape(size, 8, position, scale, rotation)
+
+
+def create_polygon_shape(size, num_sides, position=None, scale=None, rotation=None):
+    """Creates a regular polygon shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    polygon_array = np.zeros((size, size), dtype=np.uint8)
+    center_x_base, center_y_base = size // 2, size // 2  # Base center for polygon
+    center_x = center_x_base + position[0]
+    center_y = center_y_base + position[1]
+    radius = size * 0.4 * scale  # Scale radius
+
+    points = []
+    for i in range(num_sides):
+        angle = 2 * math.pi * i / num_sides
+        x_base = center_x + radius * math.cos(angle)
+        y_base = center_y + radius * math.sin(angle)
+
+        x_rel = x_base - center_x  # Coordinates relative to center for rotation
+        y_rel = y_base - center_y
+
+        if rotation != 0:  # Rotate vertices
+            cos_theta = np.cos(rotation)
+            sin_theta = np.sin(rotation)
+            x_rot = x_rel * cos_theta - y_rel * sin_theta
+            y_rot = x_rel * sin_theta + y_rel * cos_theta
+            x_rel, y_rel = x_rot, y_rot
+
+        x = int(center_x + x_rel)  # Add back center offset
+        y = int(center_y + y_rel)
+        points.append((x, y))
+
+    return create_polygon_shape_vertices(size, points, color=230)
+
+
+def create_random_convex_shape(size, position=None, scale=None, rotation=None):
+    """Creates a random convex shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    num_points = random.randint(5, 10)
+    points_base = np.random.randint(
+        0, size, size=(num_points, 2)
+    )  # Base points before transform
+
+    points_transformed = []
+    center_x, center_y = (
+        size // 2 + position[0],
+        size // 2 + position[1],
+    )  # Adjusted center
+
+    for point in points_base:
+        x_rel = (point[0] - size // 2) * scale  # Scale relative to center
+        y_rel = (point[1] - size // 2) * scale
+
+        if rotation != 0:  # Rotate points
+            cos_theta = np.cos(rotation)
+            sin_theta = np.sin(rotation)
+            x_rot = x_rel * cos_theta - y_rel * sin_theta
+            y_rot = x_rel * sin_theta + y_rel * cos_theta
+            x_rel, y_rel = x_rot, y_rot
+
+        x = int(center_x + x_rel)  # Position after transform
+        y = int(center_y + y_rel)
+        points_transformed.append((x, y))
+
+    try:
+        hull = ConvexHull(points_transformed)
+        vertices = []
+        for vertex_index in hull.vertices:
+            vertices.append(
+                (
+                    int(points_transformed[vertex_index][0]),
+                    int(points_transformed[vertex_index][1]),
+                )
+            )
+        return create_polygon_shape_vertices(size, vertices, color=160)
+    except:  # ConvexHull can fail for collinear points, handle gracefully
+        return create_square_shape(size)  # Fallback to a simple shape
+
+
+def create_random_concave_shape(size, position=None, scale=None, rotation=None):
+    """Creates a random concave shape with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    convex_shape = create_random_convex_shape(
+        size, position, scale, rotation
+    )  # Pass parameters
+    vertices_convex = []
+    num_points = random.randint(5, 10)
+    points_convex = np.random.randint(0, size, size=(num_points, 2))
+
+    points_transformed = []
+    center_x, center_y = (
+        size // 2 + position[0],
+        size // 2 + position[1],
+    )  # Adjusted center
+
+    for point in points_convex:
+        x_rel = (point[0] - size // 2) * scale  # Scale relative to center
+        y_rel = (point[1] - size // 2) * scale
+
+        if rotation != 0:  # Rotate points
+            cos_theta = np.cos(rotation)
+            sin_theta = np.sin(rotation)
+            x_rot = x_rel * cos_theta - y_rel * sin_theta
+            y_rot = x_rel * sin_theta + y_rel * cos_theta
+            x_rel, y_rel = x_rot, y_rot
+
+        x = int(center_x + x_rel)  # Position after transform
+        y = int(center_y + y_rel)
+        points_transformed.append((x, y))
+
+    try:
+        hull_convex = ConvexHull(points_transformed)
+        for vertex_index in hull_convex.vertices:
+            vertices_convex.append(
+                np.array(
+                    [
+                        points_transformed[vertex_index][0],
+                        points_transformed[vertex_index][1],
+                    ]
+                )
+            )
+    except:
+        return create_square_shape(size)  # Fallback if convex hull fails
+
+    vertices_concave = list(vertices_convex)
+
+    num_dents = random.randint(1, min(3, len(vertices_convex)))
+    dent_indices = random.sample(range(len(vertices_convex)), num_dents)
+
+    center_x_dent, center_y_dent = (
+        size // 2,
+        size // 2,
+    )  # Center for dent direction calculation - not transformed
+    for index in dent_indices:
+        vertex = vertices_concave[index]
+        direction_to_center = (
+            np.array([center_x_dent, center_y_dent]) - vertex
+        )  # Dent direction towards original center
+        direction_to_center = (
+            direction_to_center / np.linalg.norm(direction_to_center)
+            if np.linalg.norm(direction_to_center) > 0
+            else np.array([0, 0])
+        )
+        dent_amount = random.uniform(0, size / 8)
+        vertices_concave[index] = vertex + direction_to_center * dent_amount
+
+    vertices_concave_tuples = [(int(v[0]), int(v[1])) for v in vertices_concave]
+    return create_polygon_shape_vertices(size, vertices_concave_tuples, color=240)
+
+
+def create_polygon_shape_vertices(size, vertices, color):
+    polygon_array = np.zeros((size, size), dtype=np.uint8)
+    min_y = min(p[1] for p in vertices)
+    max_y = max(p[1] for p in vertices)
+
+    # Clipping vertices to image boundaries (important for rotated/scaled shapes)
+    clipped_vertices = []
+    for x, y in vertices:
+        clipped_x = max(0, min(x, size - 1))
+        clipped_y = max(0, min(y, size - 1))
+        clipped_vertices.append((clipped_x, clipped_y))
+
+    min_y = min(p[1] for p in clipped_vertices)
+    max_y = max(p[1] for p in clipped_vertices)
+    if min_y >= size or max_y < 0:  # Polygon is completely outside, return empty
+        return polygon_array
+
+    for y in range(
+        max(0, min_y), min(size, max_y + 1)
+    ):  # Iterate only within valid y range
+        x_coords = []
+        num_vertices = len(clipped_vertices)
+        for i in range(num_vertices):
+            p1 = clipped_vertices[i]
+            p2 = clipped_vertices[(i + 1) % num_vertices]
+            if (p1[1] <= y < p2[1]) or (p2[1] <= y < p1[1]):
+                if p1[1] != p2[1]:
+                    x_intersection = int(
+                        p1[0] + (y - p1[1]) * (p2[0] - p1[0]) / (p2[1] - p1[1])
+                    )
+                    x_coords.append(x_intersection)
+        x_coords.sort()
+        for i in range(0, len(x_coords), 2):
+            x_start = max(0, min(x_coords[i], size)) if i < len(x_coords) else 0
+            x_end = max(0, min(x_coords[i + 1], size)) if i + 1 < len(x_coords) else 0
+            if x_start < x_end:
+                polygon_array[y, x_start:x_end] = color
+    return polygon_array
+
+
+def create_radial_pattern_shape(size, position=None, scale=None, rotation=None):
+    """Creates a radial pattern with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 2, size // 2)
+        position_y = random.randint(-size // 2, size // 2)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(12.0, 20.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    radial_array = np.zeros((size, size), dtype=np.uint8)
+    center_x_base, center_y_base = (
+        size // 2,
+        size // 2,
+    )  # Base center for radial pattern
+    center_x = center_x_base + position[0]
+    center_y = center_y_base + position[1]
+
+    for y in range(size):
+        for x in range(size):
+            x_rel = (x - center_x) / scale  # Scale coordinates relative to center
+            y_rel = (y - center_y) / scale
+
+            if rotation != 0:  # Rotate coordinates
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = x_rel * cos_theta - y_rel * sin_theta
+                y_rot = x_rel * sin_theta + y_rel * cos_theta
+                x_rel, y_rel = x_rot, y_rot
+
+            distance_from_center = np.sqrt(x_rel**2 + y_rel**2)
+            value = int(
+                128 + 127 * math.sin(distance_from_center / 5 * 2 * math.pi)
+            )  # Adjust frequency for bands
+            radial_array[y, x] = value
+    return radial_array
+
+
+def create_wave_pattern_shape(size, position=None, scale=None, rotation=None):
+    """Creates a wave pattern with randomized position, scale, and rotation."""
+    if position is None:
+        position_x = random.randint(-size // 2, size // 2)
+        position_y = random.randint(-size // 2, size // 2)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(10.0, 15.0)
+    if rotation is None:
+        rotation = random.uniform(0, 2 * np.pi)
+
+    wave_array = np.zeros((size, size), dtype=np.uint8)
+    for y in range(size):
+        for x in range(size):
+            x_rel = (x + position[0]) / scale  # Position and scale wave pattern
+
+            if (
+                rotation != 0
+            ):  # Rotate wave direction (affects horizontal wave in this case)
+                cos_theta = np.cos(rotation)
+                sin_theta = np.sin(rotation)
+                x_rot = (
+                    x_rel * cos_theta - (y + position[1]) / scale * sin_theta
+                )  # Approximate rotation for horizontal wave
+                x_rel = x_rot  # Apply rotation mainly to x
+
+            value = int(
+                128 + 127 * math.sin(x_rel / 8 * 2 * math.pi)
+            )  # Adjust frequency for waves
+            wave_array[y, x] = value
+    return wave_array
+
+
+def create_perlin_noise_shape(
+    size,
+    octaves=None,
+    persistence=None,
+    lacunarity=None,
+    seed=None,
+    position=None,
+    scale=None,
+    rotation=None,
+    res=8,
+):  # Corrected lacunarity type
+    """Creates a Perlin noise pattern with randomized parameters, position, scale, and rotation (scale/position effect)."""
+    if position is None:
+        position_x = random.randint(-size // 4, size // 4)
+        position_y = random.randint(-size // 4, size // 4)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.5, 2.0)
+    if rotation is None:
+        rotation = random.uniform(
+            0, 2 * np.pi
+        )  # Rotation for noise orientation (image rotation)
+
+    res = random.choice([2, 4, 8])
+
+    scaled_size_float = size * scale  # Calculate scaled size as float first
+    scaled_size = int(scaled_size_float)  # Convert to int
+    scaled_size = (
+        scaled_size // res
+    ) * res  # Ensure scaled_size is a multiple of res (integer division then multiply)
+    if scaled_size % 2 == 1:
+        scaled_size -= 1
+    if scaled_size == 0:  # Handle case where scaling makes size too small
+        scaled_size = res  # Ensure it's at least res if scale is very small
+
+    offset_x = position[0] + (size - scaled_size) // 2  # Position offset
+    offset_y = position[1] + (size - scaled_size) // 2
+
+    if seed is not None:
+        np.random.seed(seed)  # Seed for reproducibility
+
+    try:
+        noise = pnp.generate_perlin_noise_2d((scaled_size, scaled_size), res=(res, res))
+    except Exception as e:
+        print(f"Error generating Perlin noise: {e}")
+        return create_blob_shape(size)  # Return fallback checkerboard
+
+    normalized_noise_scaled = ((noise + 1) / 2 * 255).astype(
+        np.uint8
+    )  # Noise generated on scaled size
+
+    perlin_array = np.zeros((size, size), dtype=np.uint8)  # Final image is full size
+    # Paste scaled noise into final image with offset
+    start_y = max(0, offset_y)
+    start_x = max(0, offset_x)
+    end_y = min(size, offset_y + scaled_size)
+    end_x = min(size, offset_x + scaled_size)
+
+    source_start_y = 0 if offset_y >= 0 else -offset_y
+    source_start_x = 0 if offset_x >= 0 else -offset_x
+
+    target_height = end_y - start_y
+    target_width = end_x - start_x
+
+    source_end_y = source_start_y + target_height
+    source_end_x = source_start_x + target_width
+
+    perlin_array[start_y:end_y, start_x:end_x] = normalized_noise_scaled[
+        source_start_y:source_end_y, source_start_x:source_end_x
+    ]
+
+    if rotation != 0:  # Rotate the entire image
+        from scipy.ndimage import rotate
+
+        perlin_array = rotate(
+            perlin_array, np.degrees(rotation), order=0, reshape=False
+        )
+
+    return perlin_array
+
+
+def create_stripes_pattern_shape(
+    size, stripe_width_param=None, angle=None, position=None, scale=None
+):
+    """Creates a stripes pattern with randomized stripe width, angle, position, and scale (scale/position effect)."""
+    if stripe_width_param is None:
+        stripe_width_param = random.randint(4, 16)  # Random stripe width
+    if angle is None:
+        angle = random.uniform(0, 90)  # Random angle (vertical or horizontal)
+    if position is None:
+        position_x = random.randint(-size // 2, size // 2)
+        position_y = random.randint(-size // 2, size // 2)
+        position = (position_x, position_y)
+    if scale is None:
+        scale = random.uniform(0.75, 5.0)
+
+    stripes_array = np.zeros((size, size), dtype=np.uint8)
+    scaled_stripe_width = int(stripe_width_param * scale)  # Scale stripe width
+
+    for y in range(size):
+        for x in range(size):
+            x_rel = (x + position[0]) / scale  # Position and scale stripe pattern
+            y_rel = (y + position[1]) / scale
+
+            if angle == 0:  # Vertical stripes
+                stripe_index = int(x_rel) // scaled_stripe_width
+            else:  # Horizontal stripes
+                stripe_index = int(y_rel) // scaled_stripe_width
+
+            if stripe_index % 2 == 0:
+                stripes_array[y, x] = 200  # Light gray stripe
+            else:
+                stripes_array[y, x] = 50  # Dark gray stripe
+    return stripes_array
+
+
+# --- Updated Shape Function List with Variations ---
+shape_functions = [
+    create_square_shape,
+    create_circle_shape,
+    create_blob_shape,
+    create_swirl_shape,
+    create_gradient_shape,
+    create_checkers_shape,
+    create_rectangle_shape,
+    create_triangle_shape,
+    create_ellipse_shape,
+    create_pentagon_shape,
+    create_hexagon_shape,
+    create_octagon_shape,
+    create_random_convex_shape,
+    create_random_concave_shape,
+    create_radial_pattern_shape,
+    create_wave_pattern_shape,
+    create_perlin_noise_shape,
+    create_stripes_pattern_shape,
+]
+
+
+def extract_wavelet_noise(image):
+    denoised_image = denoise_wavelet(image, rescale_sigma=True)
+    noise_image = image - denoised_image
+    return denoised_image, noise_image
+
+
+# %%
+current_epoch = 0
+
+
+class CustomDataset(Dataset):
+    def __init__(self, variations_per_image: int = 10, validate: bool = False):
+        self.variations_per_image = variations_per_image
+        self.validate = validate
+
+        self.composer = VectorFieldComposer()
+        self.available_fields = list(VECTOR_FIELDS.keys())
+
+        self.pos_x, self.pos_y = np.meshgrid(np.arange(TILE_SIZE), np.arange(TILE_SIZE))
+
+    def __len__(self):
+        return NUM_TILES * self.variations_per_image
+
+    def __getitem__(self, index):
+        # Indexes work like this:
+        # [1_0, ..., n_0, 1_1, ..., n_1, 1_v, ..., n_v, ...]
+        # [1  , ..., n  , n+1, ..., n+n, vn+1,..., vn+n,...]
+        # Where n is the number of images
+        # And v is the variation number
+
+        global current_epoch
+
+        # Get the image index
+        path_index = index % NUM_TILES
+        if self.validate:
+            index += 10000000
+            random.seed(index)
+        else:
+            random.seed(index + (current_epoch * NUM_TILES * self.variations_per_image))
+
+        self.composer.clear()
+
+        num_fields = random.randint(1, 2)
+        for _ in range(num_fields):
+            field_type = random.choice(self.available_fields)
+            self.composer.add_field(field_type, randomize=True)
+
+        computed_field = np.array(
+            self.composer.compute_combined_field(), dtype=np.float32
+        )
+
+        # New Variations
+        if random.random() > 0.4:
+            # Adding a shape layer
+            shape_function = random.choice(shape_functions)
+            shape_layer = shape_function(TILE_SIZE)  # Image as uint8 0-255
+
+            if random.random() > 0.5:
+                shape_layer = 255 - shape_layer  # Invert mask
+
+            # Morph the image
+            self.composer.clear()
+
+            num_fields = random.randint(1, 2)
+            for _ in range(num_fields):
+                field_type = random.choice(self.available_fields)
+                self.composer.add_field(field_type, randomize=True)
+
+            morphed_shape, _ = self.composer.apply_to_image(shape_layer)
+            if random.random() > 0.3:
+                morphed_shape = gaussian_filter(morphed_shape, sigma=1)
+                morphed_shape = (morphed_shape * (255 / np.max(morphed_shape))).astype(
+                    np.uint8
+                )
+
+            morphed_shape = morphed_shape.astype(np.float32) / 255.0
+
+            if random.random() > 0.5:
+                # Invert the inner region
+                # print("\n--1--\nMorphed Shape", morphed_shape.shape)
+                # print("Morhped ext, shape", morphed_shape[None, :, :].shape)
+                # print("Computed field", computed_field.shape)
+                final_field = (1 - morphed_shape[None, :, :]) * (
+                    computed_field * -1
+                ) + morphed_shape[None, :, :] * computed_field
+
+                # print("Final field", final_field.shape)
+
+            else:
+                # Put another field in the inner region
+
+                another_vector_field = VectorFieldComposer()
+                num_fields = random.randint(1, 2)
+                for _ in range(num_fields):
+                    field_type = random.choice(self.available_fields)
+                    another_vector_field.add_field(field_type, randomize=True)
+
+                another_computed_field = np.array(
+                    another_vector_field.compute_combined_field(),
+                    dtype=np.float32,
+                )
+
+                # print("\n--2--\nMorphed Shape", morphed_shape.shape)
+                # print("Morhped ext, shape", morphed_shape[None, :, :].shape)
+                # print("Computed field", computed_field.shape)
+                # print("Another field", another_computed_field.shape)
+
+                final_field = (
+                    1 - morphed_shape[None, :, :]
+                ) * computed_field + morphed_shape[None, :, :] * another_computed_field
+                # print("Final field", final_field.shape)
+        else:
+            final_field = computed_field
+
+        image = np.array(Image.open(TILE_IMAGE_PATHS[path_index], mode="r"))
+        image = img_as_float(image).astype(np.float32)
+        image = image / image.max()
+
+        dU_forward, dV_forward = final_field
+        dU_forward *= 3.0
+        dV_forward *= 3.0
+
+        dU_backward = -dU_forward + random.uniform(-0.1, 0.1)
+        dV_backward = -dV_forward + random.uniform(-0.1, 0.1)
+
+        new_x_forward = self.pos_x - dU_forward
+        new_y_forward = self.pos_y - dV_forward
+
+        new_x_backward = self.pos_x - dU_backward
+        new_y_backward = self.pos_y - dV_backward
+
+        denoised_image, extracted_noise = extract_wavelet_noise(image)
+
+        forward_warped_image = map_coordinates(
+            denoised_image,
+            [new_y_forward, new_x_forward],
+            order=0,
+            mode="wrap",
+        )
+        backward_warped_image = map_coordinates(
+            denoised_image,
+            [new_y_backward, new_x_backward],
+            order=0,
+            mode="wrap",
+        )
+
+        backward_image = np.clip(backward_warped_image + extracted_noise, 0.0, 1.0)
+        forward_image = np.clip(forward_warped_image + extracted_noise, 0.0, 1.0)
+
+        backward_image_tensor = (
+            torch.from_numpy(backward_image).float().unsqueeze(0)
+        )  # Size: 1, H, W
+        image_tensor = torch.from_numpy(image).float().unsqueeze(0)  # Size: 1, H, W
+        forward_image_tensor = (
+            torch.from_numpy(forward_image).float().unsqueeze(0)
+        )  # Size: 1, H, W
+
+        stacked_images = torch.stack(
+            [backward_image_tensor, image_tensor, forward_image_tensor]
+        )  # Size: 1, 1, H, W
+        stacked_images = stacked_images.repeat(1, 3, 1, 1)  # Size: 1, 3, H, W
+
+        flow_backward_to_image = torch.from_numpy(
+            np.stack([dU_backward, dV_backward])
+        ).float()
+        flow_image_to_forward = torch.from_numpy(
+            np.stack([dU_forward, dV_forward])
+        ).float()
+
+        stacked_flows = torch.stack([flow_backward_to_image, flow_image_to_forward])
+
+        valid_backward_to_image = torch.zeros_like(flow_backward_to_image[0])
+        valid_image_to_forward = torch.ones_like(flow_image_to_forward[0])
+
+        stacked_valids = torch.stack([valid_backward_to_image, valid_image_to_forward])
+
+        # print("Stacked images shape:", stacked_images.shape)
+        # print("Stacked flows shape:", stacked_flows.shape)
+        # print("Stacked valids shape:", stacked_valids.shape)
+
+        return (stacked_images, stacked_flows, stacked_valids)
+
+
+# %%
+sequence_arrays = {}
+
+# Iterate through sequence folders (e.g., "78", "g60")
+for sequence_name in os.listdir(TILES_DIR):
+    sequence_path = os.path.join(TILES_DIR, sequence_name)
+
+    if os.path.isdir(sequence_path):  # Ignore hidden files/folders
+        tile_arrays = {}  # Dictionary for tile arrays within this sequence
+
+        # Iterate through image folders within the sequence (e.g., "0001.tif", "0023.tif")
+        for image_folder_name in os.listdir(sequence_path):
+            image_folder_path = os.path.join(sequence_path, image_folder_name)
+
+            if os.path.isdir(image_folder_path):
+                # Iterate through the tile images within the image folder
+                for tile_image_name in os.listdir(image_folder_path):
+                    if tile_image_name.startswith("tile_") and tile_image_name.endswith(
+                        ".png"
+                    ):
+                        try:
+                            tile_number_match = re.search(
+                                r"tile_(\d+)\.png", tile_image_name
+                            )
+                            if tile_number_match:
+                                tile_number = int(tile_number_match.group(1))
+                                tile_image_path = os.path.join(
+                                    image_folder_path, tile_image_name
+                                )
+                                if tile_number not in tile_arrays:
+                                    tile_arrays[tile_number] = []
+                                tile_arrays[tile_number].append(tile_image_path)
+
+                        except ValueError:
+                            print(
+                                f"Warning: Could not parse tile number from {tile_image_name} in {image_folder_path}"
+                            )
+
+        sequence_arrays[sequence_name] = (
+            tile_arrays  # Add the tile arrays for this sequence
+        )
+
+
+# %%
+NUM_WORKERS = 4
+training_dataset = CustomDataset(VARIATIONS_PER_IMAGE)
+
+#! Change
+training_dataloader = DataLoader(
+    training_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    num_workers=NUM_WORKERS,
+    pin_memory=True,
+)
+
+
+# %% [markdown]
+# # Model
+
+# %%
+
+
+class twins_svt_large(nn.Module):
+    def __init__(self, pretrained=True, del_layers=True):
+        super().__init__()
+        self.svt = timm.create_model("twins_svt_large", pretrained=pretrained)
+
+        if del_layers:
+            del self.svt.head
+            del self.svt.patch_embeds[2]
+            del self.svt.patch_embeds[2]
+            del self.svt.blocks[2]
+            del self.svt.blocks[2]
+            del self.svt.pos_block[2]
+            del self.svt.pos_block[2]
+
+    def forward(self, x, data=None, layer=2):
+        B = x.shape[0]
+        for i, (embed, drop, blocks, pos_blk) in enumerate(
+            zip(
+                self.svt.patch_embeds,
+                self.svt.pos_drops,
+                self.svt.blocks,
+                self.svt.pos_block,
+            )
+        ):
+
+            x, size = embed(x)
+            x = drop(x)
+            for j, blk in enumerate(blocks):
+                x = blk(x, size)
+                if j == 0:
+                    x = pos_blk(x, size)
+            if i < len(self.svt.depths) - 1:
+                x = x.reshape(B, *size, -1).permute(0, 3, 1, 2).contiguous()
+
+            if i == 0:
+                x_16 = x.clone()
+            if i == layer - 1:
+                break
+
+        return x
+
+    def compute_params(self):
+        num = 0
+
+        for i, (embed, drop, blocks, pos_blk) in enumerate(
+            zip(
+                self.svt.patch_embeds,
+                self.svt.pos_drops,
+                self.svt.blocks,
+                self.svt.pos_block,
+            )
+        ):
+
+            for param in embed.parameters():
+                num += np.prod(param.size())
+            for param in blocks.parameters():
+                num += np.prod(param.size())
+            for param in pos_blk.parameters():
+                num += np.prod(param.size())
+            for param in drop.parameters():
+                num += np.prod(param.size())
+            if i == 1:
+                break
+        return num
+
+
+# %%
+class SKMotionEncoder6_Deep_nopool_res(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.cor_planes = cor_planes = (
+            (args.corr_radius * 2 + 1) ** 2 * args.cost_heads_num * args.corr_levels
+        )
+        self.convc1 = PCBlock4_Deep_nopool_res(cor_planes, 128, k_conv=args.k_conv)
+        self.convc2 = PCBlock4_Deep_nopool_res(256, 192, k_conv=args.k_conv)
+
+        self.convf1_ = nn.Conv2d(4, 128, 1, 1, 0)
+        self.convf2 = PCBlock4_Deep_nopool_res(128, 64, k_conv=args.k_conv)
+
+        self.conv = PCBlock4_Deep_nopool_res(64 + 192, 128 - 4, k_conv=args.k_conv)
+
+    def forward(self, flow, corr):
+        corr1, corr2 = torch.split(corr, [self.cor_planes, self.cor_planes], dim=1)
+        cor = F.gelu(torch.cat([self.convc1(corr1), self.convc1(corr2)], dim=1))
+
+        cor = self.convc2(cor)
+
+        flo = self.convf1_(flow)
+        flo = self.convf2(flo)
+
+        cor_flo = torch.cat([cor, flo], dim=1)
+        out = self.conv(cor_flo)
+
+        return torch.cat([out, flow], dim=1)
+
+
+class PCBlock4_Deep_nopool_res(nn.Module):
+    def __init__(self, C_in, C_out, k_conv):
+        super().__init__()
+        self.conv_list = nn.ModuleList(
+            [
+                nn.Conv2d(
+                    C_in, C_in, kernel, stride=1, padding=kernel // 2, groups=C_in
+                )
+                for kernel in k_conv
+            ]
+        )
+
+        self.ffn1 = nn.Sequential(
+            nn.Conv2d(C_in, int(1.5 * C_in), 1, padding=0),
+            nn.GELU(),
+            nn.Conv2d(int(1.5 * C_in), C_in, 1, padding=0),
+        )
+        self.pw = nn.Conv2d(C_in, C_in, 1, padding=0)
+        self.ffn2 = nn.Sequential(
+            nn.Conv2d(C_in, int(1.5 * C_in), 1, padding=0),
+            nn.GELU(),
+            nn.Conv2d(int(1.5 * C_in), C_out, 1, padding=0),
+        )
+
+    def forward(self, x):
+        x = F.gelu(x + self.ffn1(x))
+        for conv in self.conv_list:
+            x = F.gelu(x + conv(x))
+        x = F.gelu(x + self.pw(x))
+        x = self.ffn2(x)
+        return x
+
+
+class RelPosEmb(nn.Module):
+    def __init__(self, max_pos_size, dim_head):
+        super().__init__()
+        self.rel_height = nn.Embedding(2 * max_pos_size - 1, dim_head)
+        self.rel_width = nn.Embedding(2 * max_pos_size - 1, dim_head)
+
+        deltas = torch.arange(max_pos_size).view(1, -1) - torch.arange(
+            max_pos_size
+        ).view(-1, 1)
+        self.rel_ind: Tensor
+        rel_ind = deltas + max_pos_size - 1
+        self.register_buffer("rel_ind", rel_ind)
+
+    def forward(self, q):
+        batch, heads, h, w, c = q.shape
+        height_emb = self.rel_height(self.rel_ind[:h, :h].reshape(-1))
+        width_emb = self.rel_width(self.rel_ind[:w, :w].reshape(-1))
+
+        height_emb = rearrange(height_emb, "(x u) d -> x u () d", x=h)
+        width_emb = rearrange(width_emb, "(y v) d -> y () v d", y=w)
+
+        height_score = einsum("b h x y d, x u v d -> b h x y u v", q, height_emb)
+        width_score = einsum("b h x y d, y u v d -> b h x y u v", q, width_emb)
+
+        return height_score + width_score
+
+
+class Attention(nn.Module):
+    def __init__(
+        self,
+        *,
+        args,
+        dim,
+        max_pos_size=100,
+        heads=4,
+        dim_head=128,
+    ):
+        super().__init__()
+        self.args = args
+        self.heads = heads
+        self.scale = dim_head**-0.5
+        inner_dim = heads * dim_head
+
+        self.to_qk = nn.Conv2d(dim, inner_dim * 2, 1, bias=False)
+
+        self.pos_emb = RelPosEmb(max_pos_size, dim_head)
+
+    def forward(self, fmap):
+        heads, b, c, h, w = self.heads, *fmap.shape
+
+        q, k = self.to_qk(fmap).chunk(2, dim=1)
+
+        q, k = map(lambda t: rearrange(t, "b (h d) x y -> b h x y d", h=heads), (q, k))
+        q = self.scale * q
+
+        # if self.args.position_only:
+        #     sim = self.pos_emb(q)
+
+        # elif self.args.position_and_content:
+        #     sim_content = einsum('b h x y d, b h u v d -> b h x y u v', q, k)
+        #     sim_pos = self.pos_emb(q)
+        #     sim = sim_content + sim_pos
+
+        # else:
+        sim = einsum("b h x y d, b h u v d -> b h x y u v", q, k)
+
+        sim = rearrange(sim, "b h x y u v -> b h (x y) (u v)")
+        attn = sim.softmax(dim=-1)
+
+        return attn
+
+
+class Aggregate(nn.Module):
+    def __init__(
+        self,
+        args,
+        dim,
+        heads=4,
+        dim_head=128,
+    ):
+        super().__init__()
+        self.args = args
+        self.heads = heads
+        self.scale = dim_head**-0.5
+        inner_dim = heads * dim_head
+
+        self.to_v = nn.Conv2d(dim, inner_dim, 1, bias=False)
+
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+        if dim != inner_dim:
+            self.project = nn.Conv2d(inner_dim, dim, 1, bias=False)
+        else:
+            self.project = None
+
+    def forward(self, attn, fmap):
+        heads, b, c, h, w = self.heads, *fmap.shape
+
+        v = self.to_v(fmap)
+        v = rearrange(v, "b (h d) x y -> b h (x y) d", h=heads)
+        out = einsum("b h i j, b h j d -> b h i d", attn, v)
+        out = rearrange(out, "b h (x y) d -> b (h d) x y", x=h, y=w)
+
+        if self.project is not None:
+            out = self.project(out)
+
+        out = fmap + self.gamma * out
+
+        return out
+
+
+class SKUpdateBlock6_Deep_nopoolres_AllDecoder2(nn.Module):
+    def __init__(self, args, hidden_dim):
+        super().__init__()
+        self.args = args
+
+        args.k_conv = [1, 15]
+        args.PCUpdater_conv = [1, 7]
+
+        self.encoder = SKMotionEncoder6_Deep_nopool_res(args)
+        self.gru = PCBlock4_Deep_nopool_res(
+            128 + hidden_dim + hidden_dim + 128, 128, k_conv=args.PCUpdater_conv
+        )
+        self.flow_head = PCBlock4_Deep_nopool_res(128, 4, k_conv=args.k_conv)
+
+        self.mask = nn.Sequential(
+            nn.Conv2d(128, 256, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 64 * 9 * 2, 1, padding=0),
+        )
+
+        self.aggregator = Aggregate(args=self.args, dim=128, dim_head=128, heads=1)
+
+    def forward(self, net, inp, corr, flow, attention):
+        motion_features = self.encoder(flow, corr)
+        motion_features_global = self.aggregator(attention, motion_features)
+        inp_cat = torch.cat([inp, motion_features, motion_features_global], dim=1)
+
+        # Attentional update
+        net = self.gru(torch.cat([net, inp_cat], dim=1))
+
+        delta_flow = self.flow_head(net)
+
+        # scale mask to balence gradients
+        mask = 0.25 * self.mask(net)
+        return net, mask, delta_flow
+
+
+# %%
+
+
+class CorrBlock:
+    def __init__(self, fmap1, fmap2, num_levels=4, radius=4):
+        self.num_levels = num_levels
+        self.radius = radius
+        self.corr_pyramid = []
+
+        # all pairs correlation
+        corr = CorrBlock.corr(fmap1, fmap2)
+
+        batch, h1, w1, dim, h2, w2 = corr.shape
+        corr = corr.reshape(batch * h1 * w1, dim, h2, w2)
+
+        self.corr_pyramid.append(corr)
+        for i in range(self.num_levels - 1):
+            corr = F.avg_pool2d(corr, 2, stride=2)
+            self.corr_pyramid.append(corr)
+
+    def __call__(self, coords):
+        r = self.radius
+        coords = coords.permute(0, 2, 3, 1)
+        batch, h1, w1, _ = coords.shape
+
+        out_pyramid = []
+        for i in range(self.num_levels):
+            corr = self.corr_pyramid[i]
+            dx = torch.linspace(-r, r, 2 * r + 1)
+            dy = torch.linspace(-r, r, 2 * r + 1)
+            delta = torch.stack(torch.meshgrid(dy, dx), dim=-1).to(coords.device)
+
+            centroid_lvl = coords.reshape(batch * h1 * w1, 1, 1, 2) / 2**i
+            delta_lvl = delta.view(1, 2 * r + 1, 2 * r + 1, 2)
+            coords_lvl = centroid_lvl + delta_lvl
+
+            corr = bilinear_sampler(corr, coords_lvl)
+            corr = corr.view(batch, h1, w1, -1)
+            out_pyramid.append(corr)
+
+        out = torch.cat(out_pyramid, dim=-1)
+        return out.permute(0, 3, 1, 2).contiguous().float()
+
+    @staticmethod
+    def corr(fmap1, fmap2):
+        batch, dim, ht, wd = fmap1.shape
+        fmap1 = fmap1.view(batch, dim, ht * wd)
+        fmap2 = fmap2.view(batch, dim, ht * wd)
+
+        corr = torch.matmul(fmap1.transpose(1, 2), fmap2)
+        corr = corr.view(batch, ht, wd, 1, ht, wd)
+        return corr / torch.sqrt(torch.tensor(dim).float())
+
+
+# %%
+
+
+def bilinear_sampler(img, coords, mode="bilinear"):
+    """Wrapper for grid_sample, uses pixel coordinates"""
+    H, W = img.shape[-2:]
+    xgrid, ygrid = coords.split([1, 1], dim=-1)
+    xgrid = 2 * xgrid / (W - 1) - 1
+    ygrid = 2 * ygrid / (H - 1) - 1
+
+    grid = torch.cat([xgrid, ygrid], dim=-1)
+    img = F.grid_sample(img, grid, align_corners=True)
+
+    return img
+
+
+def coords_grid(batch, ht, wd):
+    coords = torch.meshgrid(torch.arange(ht), torch.arange(wd))
+    coords = torch.stack(coords[::-1], dim=0).float()
+    return coords[None].repeat(batch, 1, 1, 1)
+
+
+# %%
+
+
+class BOFNet(nn.Module):
+    def __init__(self, cfg: CN):
+        super().__init__()
+        self.cfg = cfg
+
+        self.hidden_dim = hdim = 128
+        self.context_dim = cdim = 128
+
+        cfg.corr_radius = 4
+        cfg.corr_levels = 4
+
+        # feature network, context network, and update block
+        print("[Using twins as context encoder]")
+        self.cnet = twins_svt_large(pretrained=True)
+
+        print("[Using twins as feature encoder]")
+        self.fnet = twins_svt_large(pretrained=True)
+
+        print("[Using GMA-SK2]")
+        self.cfg.cost_heads_num = 1
+        self.update_block = SKUpdateBlock6_Deep_nopoolres_AllDecoder2(
+            args=self.cfg, hidden_dim=128
+        )
+
+        print("[Using corr_fn {}]".format(self.cfg.corr_fn))
+
+        self.att = Attention(
+            args=self.cfg, dim=128, heads=1, max_pos_size=160, dim_head=128
+        )
+
+    def initialize_flow(self, img):
+        """Flow is represented as difference between two coordinate grids flow = coords1 - coords0"""
+        N, C, H, W = img.shape
+        coords0 = coords_grid(N, H // 8, W // 8).to(img.device)
+        coords1 = coords_grid(N, H // 8, W // 8).to(img.device)
+
+        # optical flow computed as difference: flow = coords1 - coords0
+        return coords0, coords1
+
+    def upsample_flow(self, flow, mask):
+        """Upsample flow field [H/8, W/8, 2] -> [H, W, 2] using convex combination"""
+        N, _, H, W = flow.shape
+        mask = mask.view(N, 1, 9, 8, 8, H, W)
+        mask = torch.softmax(mask, dim=2)
+
+        up_flow = F.unfold(8 * flow, (3, 3), padding=1)
+        up_flow = up_flow.view(N, 2, 9, 1, 1, H, W)
+
+        up_flow = torch.sum(mask * up_flow, dim=2)
+        up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
+        return up_flow.reshape(N, 2, 8 * H, 8 * W)
+
+    def forward(self, images):
+
+        B, N, _, H, W = images.shape
+
+        images = 2 * (images / 255.0) - 1.0
+
+        hdim = self.hidden_dim
+        cdim = self.context_dim
+
+        with autocast(device_type="cuda", enabled=self.cfg.mixed_precision):
+            fmaps = self.fnet(images.reshape(B * N, 3, H, W)).reshape(
+                B, N, -1, H // 8, W // 8
+            )
+        fmaps = fmaps.float()
+        fmap1 = fmaps[:, 0, ...]
+        fmap2 = fmaps[:, 1, ...]
+        fmap3 = fmaps[:, 2, ...]
+
+        corr_fn_21 = CorrBlock(
+            fmap2, fmap1, num_levels=self.cfg.corr_levels, radius=self.cfg.corr_radius
+        )
+        corr_fn_23 = CorrBlock(
+            fmap2, fmap3, num_levels=self.cfg.corr_levels, radius=self.cfg.corr_radius
+        )
+
+        with autocast(device_type="cuda", enabled=self.cfg.mixed_precision):
+            cnet = self.cnet(images[:, 1, ...])
+            net, inp = torch.split(cnet, [hdim, cdim], dim=1)
+            net = torch.tanh(net)
+            inp = torch.relu(inp)
+            attention = self.att(inp)
+
+        coords0_21, coords1_21 = self.initialize_flow(images[:, 0, ...])
+        coords0_23, coords1_23 = self.initialize_flow(images[:, 0, ...])
+
+        flow_predictions = []
+        for itr in range(self.cfg.decoder_depth):
+            coords1_21 = coords1_21.detach()
+            coords1_23 = coords1_23.detach()
+
+            corr21 = corr_fn_21(coords1_21)
+            corr23 = corr_fn_23(coords1_23)
+            corr = torch.cat([corr23, corr21], dim=1)
+
+            flow21 = coords1_21 - coords0_21
+            flow23 = coords1_23 - coords0_23
+            flow = torch.cat([flow23, flow21], dim=1)
+
+            with autocast(device_type="cuda", enabled=self.cfg.mixed_precision):
+                net, up_mask, delta_flow = self.update_block(
+                    net, inp, corr, flow, attention
+                )
+
+            up_mask_21, up_mask_23 = torch.split(up_mask, [64 * 9, 64 * 9], dim=1)
+
+            coords1_23 = coords1_23 + delta_flow[:, 0:2, ...]
+            coords1_21 = coords1_21 + delta_flow[:, 2:4, ...]
+
+            # upsample predictions
+            flow_up_23 = self.upsample_flow(coords1_23 - coords0_23, up_mask_23)
+            flow_up_21 = self.upsample_flow(coords1_21 - coords0_21, up_mask_21)
+
+            flow_predictions.append(torch.stack([flow_up_23, flow_up_21], dim=1))
+
+        if self.training:
+            return flow_predictions
+        else:
+            return flow_predictions[-1], torch.stack(
+                [coords1_23 - coords0_23, coords1_21 - coords0_21], dim=1
+            )
+
+
+# %%
+
+_CN = CN()
+# TODO: Go through this and find which ones are actually used
+_CN.gamma = 0.8
+_CN.max_flow = 400
+_CN.sum_freq = 100
+_CN.val_freq = 100000000
+_CN.image_size = [256, 256]
+_CN.use_smoothl1 = False
+
+_CN.mixed_precision = False
+_CN.filter_epe = False
+
+_CN.BOFNet = CN()
+_CN.BOFNet.corr_levels = 4
+_CN.BOFNet.mixed_precision = False
+
+_CN.BOFNet.decoder_depth = 12
+
+### TRAINER
+_CN.trainer = CN()
+_CN.trainer.adamw_decay = 1e-4
+_CN.trainer.clip = 1.0
+_CN.trainer.num_steps = 120000
+_CN.trainer.epsilon = 1e-8
+_CN.trainer.anneal_strategy = "linear"
+
+cfg = _CN.clone()
+model = BOFNet(cfg.BOFNet).to(device)
+if os.path.exists("snapshot_save.pt"):
+    model.load_state_dict(torch.load("snapshot_save.pt", weights_only=True))
+elif os.path.exists(MODEL_FILE):
+    model.load_state_dict(torch.load(MODEL_FILE, weights_only=True))
+print(model)
+
+
+# %% Custom Loss
+def custom_loss(
+    predicted_vectors: List[Tensor], target_vectors: Tensor, valid: Tensor, cfg: CN
+) -> Tuple[Tensor, float, bool]:
+    """Loss function defined over sequence of flow predictions"""
+
+    # print(flow_gt.shape, valid.shape, flow_preds[0].shape)
+    # exit()
+
+    gamma: float = cfg.gamma
+    max_flow = cfg.max_flow
+    n_predictions = len(predicted_vectors)
+    flow_loss: Tensor = torch.tensor(0.0).to(device)
+
+    B, N, _, H, W = target_vectors.shape
+
+    NAN_flag = False
+
+    # exlude invalid pixels and extremely large diplacements
+    mag = torch.sum(target_vectors**2, dim=2).sqrt()
+    valid = (valid >= 0.5) & (mag < max_flow)
+
+    for i in range(n_predictions):
+        i_weight = gamma ** (n_predictions - i - 1)
+
+        flow_pre = predicted_vectors[i]
+        i_loss = (flow_pre - target_vectors).abs()
+
+        if torch.isnan(i_loss).any():
+            NAN_flag = True
+
+        _valid = valid[:, :, None]
+        if cfg.filter_epe:
+            loss_mag = torch.sum(i_loss**2, dim=2).sqrt()
+            mask = loss_mag > 1000
+            # print(mask.shape, _valid.shape)
+            if torch.any(mask):
+                print(
+                    "[Found extrem epe. Filtered out. Max is {}. Ratio is {}]".format(
+                        torch.max(loss_mag), torch.mean(mask.float())
+                    )
+                )
+                _valid = _valid & (~mask[:, :, None])
+
+        flow_loss += i_weight * (_valid * i_loss).mean()
+
+    epe = torch.sum((predicted_vectors[-1] - target_vectors) ** 2, dim=2).sqrt()
+    epe = epe.view(-1)[valid.view(-1)]
+
+    return flow_loss, epe.mean().item(), NAN_flag
+
+
+# %%
+optimizer = optim.AdamW(
+    model.parameters(),
+    lr=LEARNING_RATE,
+    weight_decay=cfg.trainer.adamw_decay,
+    eps=cfg.trainer.epsilon,
+)
+scheduler = optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    LEARNING_RATE,
+    cfg.trainer.num_steps + 100,
+    pct_start=0.05,
+    cycle_momentum=False,
+    anneal_strategy=cfg.trainer.anneal_strategy,
+)
+scaler = GradScaler(device="cuda", enabled=cfg.mixed_precision)
+
+# %%
+wandb_config = {
+    "gpu": GPU,
+    "gpu_memory": GPU_MEMORY,
+    "learning_rate": LEARNING_RATE,
+    "batch_size": BATCH_SIZE,
+    "architecture": "MotionVectorMOFNet-VideoFlow",
+    "dataset": {
+        "train": len(training_dataset),
+    },
+    "loss_function": "EPE",
+    "optimizer": "AdamW",
+    "scheduler": {
+        "type": "OneCycleLR",
+        "max_lr": 0.001,
+        "pct_start": 0.05,
+        "anneal_strategy": "linear",
+    },
+}
+if MAX_TIME:
+    wandb_config["max_time"] = MAX_TIME
+else:
+    wandb_config["epochs"] = EPOCHS
+
+run = wandb.init(
+    project="motion-model",
+    name=MODEL_NAME,
+    config=wandb_config,
+)
+
+run.alert(
+    title=f"Start Training",
+    text=f"Starting training for {MODEL_NAME}. Max time: {MAX_TIME} seconds, Epochs: {EPOCHS}, Batch size: {BATCH_SIZE}, GPU Memory: {GPU_MEMORY}, GPU: {GPU}",
+    level="INFO",
+)
+
+wandb.watch(model, log="all", log_freq=100)
+print(run.name)
+
+# %%
+# Samples to save
+
+samples_images = []
+samples_vectors = []
+seeds = [1, 3, 4, 25, 32, 38]
+
+for s in seeds:
+    images, vectors, valids = training_dataset[s]
+    samples_images.append(images)
+    samples_vectors.append(vectors)
+
+
+# List of tuples of (images, vectors)
+samples_images = torch.from_numpy(np.array(samples_images)).float()
+
+# %%
+
+
+def make_colorwheel():
+    """
+    Generates a color wheel for optical flow visualization as presented in:
+        Baker et al. "A Database and Evaluation Methodology for Optical Flow" (ICCV, 2007)
+        URL: http://vision.middlebury.edu/flow/flowEval-iccv07.pdf
+
+    Code follows the original C++ source code of Daniel Scharstein.
+    Code follows the the Matlab source code of Deqing Sun.
+
+    Returns:
+        np.ndarray: Color wheel
+    """
+
+    RY = 15
+    YG = 6
+    GC = 4
+    CB = 11
+    BM = 13
+    MR = 6
+
+    ncols = RY + YG + GC + CB + BM + MR
+    colorwheel = np.zeros((ncols, 3))
+    col = 0
+
+    # RY
+    colorwheel[0:RY, 0] = 255
+    colorwheel[0:RY, 1] = np.floor(255 * np.arange(0, RY) / RY)
+    col = col + RY
+    # YG
+    colorwheel[col : col + YG, 0] = 255 - np.floor(255 * np.arange(0, YG) / YG)
+    colorwheel[col : col + YG, 1] = 255
+    col = col + YG
+    # GC
+    colorwheel[col : col + GC, 1] = 255
+    colorwheel[col : col + GC, 2] = np.floor(255 * np.arange(0, GC) / GC)
+    col = col + GC
+    # CB
+    colorwheel[col : col + CB, 1] = 255 - np.floor(255 * np.arange(CB) / CB)
+    colorwheel[col : col + CB, 2] = 255
+    col = col + CB
+    # BM
+    colorwheel[col : col + BM, 2] = 255
+    colorwheel[col : col + BM, 0] = np.floor(255 * np.arange(0, BM) / BM)
+    col = col + BM
+    # MR
+    colorwheel[col : col + MR, 2] = 255 - np.floor(255 * np.arange(MR) / MR)
+    colorwheel[col : col + MR, 0] = 255
+    return colorwheel
+
+
+def flow_uv_to_colors(u, v, convert_to_bgr=False):
+    """
+    Applies the flow color wheel to (possibly clipped) flow components u and v.
+
+    According to the C++ source code of Daniel Scharstein
+    According to the Matlab source code of Deqing Sun
+
+    Args:
+        u (np.ndarray): Input horizontal flow of shape [H,W]
+        v (np.ndarray): Input vertical flow of shape [H,W]
+        convert_to_bgr (bool, optional): Convert output image to BGR. Defaults to False.
+
+    Returns:
+        np.ndarray: Flow visualization image of shape [H,W,3]
+    """
+    flow_image = np.zeros((u.shape[0], u.shape[1], 3), np.uint8)
+    colorwheel = make_colorwheel()  # shape [55x3]
+    ncols = colorwheel.shape[0]
+    rad = np.sqrt(np.square(u) + np.square(v))
+    a = np.arctan2(-v, -u) / np.pi
+    fk = (a + 1) / 2 * (ncols - 1)
+    k0 = np.floor(fk).astype(np.int32)
+    k1 = k0 + 1
+    k1[k1 == ncols] = 0
+    f = fk - k0
+    for i in range(colorwheel.shape[1]):
+        tmp = colorwheel[:, i]
+        col0 = tmp[k0] / 255.0
+        col1 = tmp[k1] / 255.0
+        col = (1 - f) * col0 + f * col1
+        idx = rad <= 1
+        col[idx] = 1 - rad[idx] * (1 - col[idx])
+        col[~idx] = col[~idx] * 0.75  # out of range
+        # Note the 2-i => BGR instead of RGB
+        ch_idx = 2 - i if convert_to_bgr else i
+        flow_image[:, :, ch_idx] = np.floor(255 * col)
+    return flow_image
+
+
+def flow_to_image(flow_uv, clip_flow=None, convert_to_bgr=False):
+    """
+    Expects a two dimensional flow image of shape.
+
+    Args:
+        flow_uv (np.ndarray): Flow UV image of shape [H,W,2]
+        clip_flow (float, optional): Clip maximum of flow values. Defaults to None.
+        convert_to_bgr (bool, optional): Convert output image to BGR. Defaults to False.
+
+    Returns:
+        np.ndarray: Flow visualization image of shape [H,W,3]
+    """
+    assert flow_uv.ndim == 3, "input flow must have three dimensions"
+    assert flow_uv.shape[2] == 2, "input flow must have shape [H,W,2]"
+    if clip_flow is not None:
+        flow_uv = np.clip(flow_uv, 0, clip_flow)
+    u = flow_uv[:, :, 0]
+    v = flow_uv[:, :, 1]
+    rad = np.sqrt(np.square(u) + np.square(v))
+    rad_max = np.max(rad)
+    epsilon = 1e-5
+    u = u / (rad_max + epsilon)
+    v = v / (rad_max + epsilon)
+    return flow_uv_to_colors(u, v, convert_to_bgr)
+
+
+def vis_pre(flow_pre, vis_dir):
+
+    if not os.path.exists(vis_dir):
+        os.makedirs(vis_dir)
+
+    N = flow_pre.shape[0]
+
+    for idx in range(N // 2):
+        flow_img = flow_to_image(flow_pre[idx].permute(1, 2, 0).numpy())
+        image = Image.fromarray(flow_img)
+        image.save("{}/flow_{:04}_to_{:04}.png".format(vis_dir, idx + 2, idx + 3))
+
+    for idx in range(N // 2, N):
+        flow_img = flow_to_image(flow_pre[idx].permute(1, 2, 0).numpy())
+        image = Image.fromarray(flow_img)
+        image.save(
+            "{}/flow_{:04}_to_{:04}.png".format(
+                vis_dir, idx - N // 2 + 2, idx - N // 2 + 1
+            )
+        )
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+# %%
+
+epoch = -1
+keep_training = True
+
+training_start_time = time.time()
+
+while keep_training:
+    epoch += 1
+    current_epoch = epoch
+
+    print(f"Epoch {epoch+1}\n-------------------------------")
+    model.train()
+    epoch_training_losses = []
+
+    size = len(training_dataloader)
+    milestone = 0
+    for batch, (batch_images, batch_vectors, valids) in enumerate(training_dataloader):
+        batch_images, batch_vectors, valids = (
+            batch_images.to(device),
+            batch_vectors.to(device),
+            valids.to(device),
+        )
+
+        optimizer.zero_grad()
+
+        # Compute prediction error
+        pred = model(batch_images)
+        loss, epe, Nan_flag = custom_loss(pred, batch_vectors, valids, cfg)
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        total_grads = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), max_norm=cfg.trainer.clip
+        )
+
+        scaler.step(optimizer)
+        scheduler.step()
+        scaler.update()
+
+        wandb.log(
+            {
+                "batch/train_loss": epe,
+                "batch/gradient_norm": total_grads,
+                "batch/learning_rate": optimizer.param_groups[0]["lr"],
+            }
+        )
+
+        epoch_training_losses.append(epe)
+
+        if batch > (milestone * 100):
+            milestone += 1
+            print(f"loss: { epe:>7f}  [{batch:>5d}/{size:>5d}]")
+
+    if epoch % SAVE_FREQUENCY == 0:
+        model.eval()
+        with torch.no_grad():
+            torch.save(model.state_dict(), "snapshot_save.pt")
+
+            sample_predictions, _ = model(samples_images.to(device))
+
+            for i, images in enumerate(samples_images):
+
+                flow_gt = flow_to_image(samples_vectors[i][1].permute(1, 2, 0).numpy())
+
+                flow_pred = sample_predictions[i][1].cpu()
+
+                flow_pred = flow_to_image(flow_pred.permute(1, 2, 0).numpy())
+
+                base_image = np.transpose(images[0].cpu().numpy(), (1, 2, 0)) * 256
+                next_time = np.transpose(images[1].cpu().numpy(), (1, 2, 0)) * 256
+
+                combined = np.hstack(
+                    (base_image, next_time, flow_gt, flow_pred)
+                ).astype(np.uint8)
+
+                wandb.log(
+                    {
+                        f"validations/sample_s{seeds[i]}": wandb.Image(
+                            combined, caption=f"Epoch: {epoch}"
+                        ),
+                    }
+                )
+
+            sequence_name = "g69"  # g69 71-72 tile 9-11
+            tiles = [9, 10, 11]
+            frame_start = 71 - 35
+            for tile in tiles:
+                tile_sequence_paths = sequence_arrays[sequence_name][tile]
+                past_image_path = tile_sequence_paths[frame_start - 1]
+                base_image_path = tile_sequence_paths[frame_start]
+                next_time_path = tile_sequence_paths[frame_start + 1]
+
+                past_image = img_as_float(np.array(Image.open(past_image_path)))
+                past_image = torch.from_numpy(past_image).float()
+                past_image = torch.stack([past_image, past_image, past_image])
+
+                base_image = img_as_float(np.array(Image.open(base_image_path)))
+                base_image = torch.from_numpy(base_image).float()
+                base_image = torch.stack([base_image, base_image, base_image])
+
+                next_time = img_as_float(np.array(Image.open(next_time_path)))
+                next_time = torch.from_numpy(next_time).float()
+                next_time = torch.stack([next_time, next_time, next_time])
+
+                X = torch.stack([past_image, base_image, next_time])
+                X = X.unsqueeze(0)
+                X = X.to(device)
+                pred, _ = model(X)
+
+                flow_pred = pred[0][1].cpu()
+                flow_pred = flow_to_image(flow_pred.permute(1, 2, 0).numpy())
+
+                base_image = np.transpose(base_image.cpu().numpy(), (1, 2, 0)) * 256
+                next_time = np.transpose(next_time.cpu().numpy(), (1, 2, 0)) * 256
+
+                combined = np.hstack(
+                    (
+                        base_image,
+                        next_time,
+                        flow_pred,
+                    )
+                ).astype(np.uint8)
+
+                wandb.log(
+                    {
+                        f"tests/sample_{sequence_name}_{tile}_{frame_start}": wandb.Image(
+                            combined, caption=f"Epoch: {epoch}"
+                        ),
+                    }
+                )
+
+    print(f"Epoch {epoch+1}/{EPOCHS}")
+
+    if MAX_TIME:
+        if time.time() - training_start_time > MAX_TIME:
+            keep_training = False
+            print(f"Max time reached. Stopping training.")
+            break
+        else:
+            print(
+                f"Training for {MAX_TIME - time.time() + training_start_time} more seconds."
+            )
+    elif EPOCHS:
+        if epoch >= EPOCHS:
+            keep_training = False
+            print(f"Max epochs reached. Stopping training.")
+            break
+
+run.alert(
+    title=f"End Training",
+    text=f"Training finished for {MODEL_NAME}. Completed in {time.time() - training_start_time:.2f} seconds, Epochs: {epoch+1}",
+    level="INFO",
+)
+
+
+model_artifact = wandb.Artifact(
+    name=f"motion_vector_model_{run.id}",
+    type="model",
+    description="Trained motion vector model",
+)
+
+torch.save(model.state_dict(), MODEL_FILE)
+model_artifact.add_file(MODEL_FILE)
+wandb.log_artifact(model_artifact)
+
+wandb.finish()
+
+print(f"Model saved to {MODEL_FILE}")
+print("Done!")
