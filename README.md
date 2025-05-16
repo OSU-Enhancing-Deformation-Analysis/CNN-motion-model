@@ -1,6 +1,7 @@
 # Motion Vector Prediction Model
 
-> This README specifically details the `batch-m4-combo.py` file. 
+> This README specifically details the `batch-m4-combo.py` file.
+[Combo Model](https://github.com/OSU-Enhancing-Deformation-Analysis/CNN-motion-model/blob/main/batch_models/batch-m4-combo.py)
 
 ## Overview
 
